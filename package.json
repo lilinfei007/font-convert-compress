@@ -1,7 +1,7 @@
 {
-  "name": "font-to-ttf-converter",
+  "name": "font-format-converter",
   "version": "1.0.0",
-  "description": "A small Node app with frontend support for converting font files to TTF.",
+  "description": "A small Node app with frontend support for converting, subsetting, and compressing font files.",
   "type": "module",
   "private": true,
   "scripts": {

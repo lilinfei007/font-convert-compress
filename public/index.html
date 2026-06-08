@@ -3,16 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>字体转 TTF 工具</title>
+    <title>字体格式转换工具</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <main class="shell">
       <section class="hero">
         <p class="eyebrow">Node + Frontend</p>
-        <h1>字体文件一键转成 TTF</h1>
+        <h1>字体文件一键转换格式</h1>
         <p class="lead">
-          选择本地字体文件，页面会调用本地 Node 服务完成转换，并直接下载 `.ttf` 结果。
+          选择本地字体文件，页面会调用本地 Node 服务完成转换，并直接下载目标格式结果。
         </p>
       </section>
 
@@ -37,7 +37,13 @@
           </div>
           <div>
             <p class="meta-label">输出格式</p>
-            <p class="meta-value">`.ttf`</p>
+            <select id="outputFormat" class="format-select" aria-label="输出格式">
+              <option value="ttf" selected>TTF</option>
+              <option value="woff">WOFF</option>
+              <option value="woff2">WOFF2</option>
+              <option value="eot">EOT</option>
+              <option value="svg">SVG</option>
+            </select>
           </div>
           <div>
             <p class="meta-label">处理方式</p>
@@ -45,12 +51,24 @@
           </div>
         </div>
 
+        <div class="source-library">
+          <label class="field source-library-field" for="sourceFontSelect">
+            <span class="field-title">已保存原始字体</span>
+            <select id="sourceFontSelect" class="preset-select"></select>
+          </label>
+          <div class="source-library-actions">
+            <button id="useSavedSourceButton" class="secondary-button" type="button" disabled>使用</button>
+            <button id="deleteSavedSourceButton" class="secondary-button" type="button" disabled>移除</button>
+          </div>
+          <p id="sourceLibraryMeta" class="subset-footnote">正在读取服务端原始字体列表...</p>
+        </div>
+
         <section class="options-panel" aria-label="字体瘦身选项">
           <div class="options-copy">
             <p class="options-eyebrow">Subset Plan</p>
             <h2>字体切割与瘦身</h2>
             <p>
-              只保留你真正会用到的字符，是缩小 TTF 体积最有效的方法。默认还会去掉 hinting 和
+              只保留你真正会用到的字符，是缩小输出字体体积最有效的方法。默认还会去掉 hinting 和
               kerning，进一步减小文件。
             </p>
           </div>
@@ -60,7 +78,7 @@
               <input id="operationFresh" type="radio" name="operationMode" value="fresh" checked />
               <span>
                 <strong>新建子集</strong>
-                <small>从原始全量字体直接生成新的压缩 TTF</small>
+                <small>从原始全量字体直接生成新的目标格式字体</small>
               </span>
             </label>
 
@@ -68,14 +86,14 @@
               <input id="operationIncremental" type="radio" name="operationMode" value="incremental" />
               <span>
                 <strong>增量更新</strong>
-                <small>在现有已压缩 TTF 的字符基础上，合并新增字符重新生成</small>
+                <small>在现有子集字体的字符基础上，合并新增字符重新生成</small>
               </span>
             </label>
           </div>
 
           <div id="existingSubsetPanel" class="source-panel is-hidden">
             <label class="field" for="existingSubsetFile">
-              <span class="field-title">当前子集字体（已压缩 TTF）</span>
+              <span class="field-title">当前子集字体</span>
               <input
                 id="existingSubsetUrl"
                 class="text-input"
@@ -97,6 +115,14 @@
               </span>
             </label>
             <p id="existingSubsetMeta" class="subset-footnote">还没有选择当前子集字体。</p>
+            <p id="sourceMatchMeta" class="subset-footnote">选择当前子集字体后，会自动匹配曾用于生成它的原始全量字体。</p>
+            <div id="subsetPreviewPanel" class="subset-preview is-hidden" aria-live="polite">
+              <p id="subsetPreviewMeta" class="subset-preview-meta"></p>
+              <div id="subsetPreviewText" class="subset-preview-text" aria-label="当前子集字体字符预览"></div>
+              <div class="subset-preview-actions">
+                <button id="subsetPreviewMore" class="preview-more-button is-hidden" type="button">显示更多字符</button>
+              </div>
+            </div>
           </div>
 
           <div class="source-switch" role="radiogroup" aria-label="字符集来源">
@@ -192,7 +218,7 @@
 
           <p id="subsetSummary" class="subset-summary">当前保留完整字体，不做字符切割。</p>
           <p class="subset-footnote">
-            提醒：很多 OTF 本身并不包含可保留的 hinting 或 kerning 表，这种情况下勾选它们不会改变体积。增量更新时必须同时提供原始全量字体和当前子集字体来源（网络地址或本地文件）。
+            提醒：很多 OTF 本身并不包含可保留的 hinting 或 kerning 表，这种情况下勾选它们不会改变体积。增量更新时先提供当前子集字体来源（网络地址或本地文件），系统会自动匹配原始全量字体；匹配不到时再在上方手动上传原始全量字体。
           </p>
         </section>
 
@@ -200,6 +226,14 @@
           <button id="convertButton" class="primary-button" disabled>转换并下载 TTF</button>
           <p id="status" class="status">请选择一个字体文件开始。</p>
         </div>
+
+        <section id="outputPreviewPanel" class="subset-preview output-preview is-hidden" aria-live="polite">
+          <p id="outputPreviewMeta" class="subset-preview-meta"></p>
+          <div id="outputPreviewText" class="subset-preview-text" aria-label="压缩完成字体字符预览"></div>
+          <div class="subset-preview-actions">
+            <button id="outputPreviewMore" class="preview-more-button is-hidden" type="button">显示更多字符</button>
+          </div>
+        </section>
       </section>
     </main>
 
