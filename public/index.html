@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>字体转 TTF 工具</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">Node + Frontend</p>
+        <h1>字体文件一键转成 TTF</h1>
+        <p class="lead">
+          选择本地字体文件，页面会调用本地 Node 服务完成转换，并直接下载 `.ttf` 结果。
+        </p>
+      </section>
+
+      <section class="panel">
+        <div class="dropzone" id="dropzone">
+          <input
+            id="fontFile"
+            class="file-input"
+            type="file"
+            accept=".ttf,.otf,.woff,.woff2,.eot,.svg"
+          />
+          <div class="dropzone-copy">
+            <p class="dropzone-title">拖入原始全量字体，或点击这里选择</p>
+            <p class="dropzone-hint">原始字体支持：TTF / OTF / WOFF / WOFF2 / EOT / SVG</p>
+          </div>
+        </div>
+
+        <div class="meta-card">
+          <div>
+            <p class="meta-label">原始字体</p>
+            <p id="fileName" class="meta-value">还没有选择文件</p>
+          </div>
+          <div>
+            <p class="meta-label">输出格式</p>
+            <p class="meta-value">`.ttf`</p>
+          </div>
+          <div>
+            <p class="meta-label">处理方式</p>
+            <p class="meta-value">本地 Node 转换</p>
+          </div>
+        </div>
+
+        <section class="options-panel" aria-label="字体瘦身选项">
+          <div class="options-copy">
+            <p class="options-eyebrow">Subset Plan</p>
+            <h2>字体切割与瘦身</h2>
+            <p>
+              只保留你真正会用到的字符，是缩小 TTF 体积最有效的方法。默认还会去掉 hinting 和
+              kerning，进一步减小文件。
+            </p>
+          </div>
+
+          <div class="operation-switch" role="radiogroup" aria-label="处理模式">
+            <label class="source-option" for="operationFresh">
+              <input id="operationFresh" type="radio" name="operationMode" value="fresh" checked />
+              <span>
+                <strong>新建子集</strong>
+                <small>从原始全量字体直接生成新的压缩 TTF</small>
+              </span>
+            </label>
+
+            <label class="source-option" for="operationIncremental">
+              <input id="operationIncremental" type="radio" name="operationMode" value="incremental" />
+              <span>
+                <strong>增量更新</strong>
+                <small>在现有已压缩 TTF 的字符基础上，合并新增字符重新生成</small>
+              </span>
+            </label>
+          </div>
+
+          <div id="existingSubsetPanel" class="source-panel is-hidden">
+            <label class="field" for="existingSubsetFile">
+              <span class="field-title">当前子集字体（已压缩 TTF）</span>
+              <input
+                id="existingSubsetUrl"
+                class="text-input"
+                type="url"
+                inputmode="url"
+                placeholder="可选：填写 http:// 或 https:// 的子集字体地址"
+              />
+              <span class="field-help">
+                如果这里填写了网络地址，系统会优先使用该 URL；留空时才会读取下面上传的本地子集字体。
+              </span>
+              <input
+                id="existingSubsetFile"
+                class="charset-file-input"
+                type="file"
+                accept=".ttf,.otf,.woff,.woff2,.eot,.svg"
+              />
+              <span class="field-help">
+                增量模式下二选一即可。系统会先读取它已有的字符，再和你这次新增的字符做并集。
+              </span>
+            </label>
+            <p id="existingSubsetMeta" class="subset-footnote">还没有选择当前子集字体。</p>
+          </div>
+
+          <div class="source-switch" role="radiogroup" aria-label="字符集来源">
+            <label class="source-option" for="modeFull">
+              <input id="modeFull" type="radio" name="subsetMode" value="full" checked />
+              <span>
+                <strong>完整字体</strong>
+                <small>不做字符切割，只保留原字体全部字形</small>
+              </span>
+            </label>
+
+            <label class="source-option" for="modePreset">
+              <input id="modePreset" type="radio" name="subsetMode" value="preset" />
+              <span>
+                <strong>系统预设</strong>
+                <small>直接选择常用 3500 字或扩展 6500 字预设</small>
+              </span>
+            </label>
+
+            <label class="source-option" for="modeManual">
+              <input id="modeManual" type="radio" name="subsetMode" value="manual" />
+              <span>
+                <strong>手动输入</strong>
+                <small>自己输入需要保留的字符，适合按项目文案裁剪</small>
+              </span>
+            </label>
+
+            <label class="source-option" for="modeFile">
+              <input id="modeFile" type="radio" name="subsetMode" value="file" />
+              <span>
+                <strong>上传字符集文件</strong>
+                <small>从文本文件读取字符集，适合批量压缩或复用字集</small>
+              </span>
+            </label>
+          </div>
+
+          <div id="presetPanel" class="source-panel is-hidden">
+            <label class="field" for="presetSelect">
+              <span class="field-title">系统预设字集</span>
+              <select id="presetSelect" class="preset-select"></select>
+              <span id="presetDescription" class="field-help">正在加载系统预设...</span>
+            </label>
+          </div>
+
+          <div id="manualPanel" class="source-panel is-hidden">
+            <label class="field" for="subsetText">
+              <span class="field-title">保留字符</span>
+              <textarea
+                id="subsetText"
+                class="subset-input"
+                rows="5"
+                placeholder="例如：0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz首页按钮菜单中文标题"
+              ></textarea>
+              <span class="field-help">
+                输入内容后，仅保留这些字符对应的字形；换行只作为分隔，不会写进字体。
+              </span>
+            </label>
+          </div>
+
+          <div id="filePanel" class="source-panel is-hidden">
+            <label class="field" for="charsetFile">
+              <span class="field-title">上传字符集文件</span>
+              <input
+                id="charsetFile"
+                class="charset-file-input"
+                type="file"
+                accept=".txt,.text,.md,.csv,.json"
+              />
+              <span class="field-help">
+                文件里的所有可见字符都会参与子集化；常见做法是准备一份项目文案文本。
+              </span>
+            </label>
+            <p id="charsetFileMeta" class="subset-footnote">还没有选择字符集文件。</p>
+          </div>
+
+          <div class="toggle-grid">
+            <label class="toggle-card" for="keepHinting">
+              <input id="keepHinting" type="checkbox" />
+              <span>
+                <strong>保留 hinting</strong>
+                <small>显示更稳，但输出文件会更大</small>
+              </span>
+            </label>
+
+            <label class="toggle-card" for="keepKerning">
+              <input id="keepKerning" type="checkbox" />
+              <span>
+                <strong>保留 kerning</strong>
+                <small>字距信息更完整，但输出文件会更大</small>
+              </span>
+            </label>
+          </div>
+
+          <p id="subsetSummary" class="subset-summary">当前保留完整字体，不做字符切割。</p>
+          <p class="subset-footnote">
+            提醒：很多 OTF 本身并不包含可保留的 hinting 或 kerning 表，这种情况下勾选它们不会改变体积。增量更新时必须同时提供原始全量字体和当前子集字体来源（网络地址或本地文件）。
+          </p>
+        </section>
+
+        <div class="actions">
+          <button id="convertButton" class="primary-button" disabled>转换并下载 TTF</button>
+          <p id="status" class="status">请选择一个字体文件开始。</p>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

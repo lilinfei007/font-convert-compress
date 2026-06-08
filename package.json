@@ -1,0 +1,14 @@
+{
+  "name": "font-to-ttf-converter",
+  "version": "1.0.0",
+  "description": "A small Node app with frontend support for converting font files to TTF.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "fonteditor-core": "^2.6.3"
+  }
+}

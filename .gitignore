@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.log
+__pycache__/
+.pydeps/
+*.pyc
+all_artboards_text.txt
+_charset_source/
