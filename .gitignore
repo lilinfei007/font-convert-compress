@@ -7,3 +7,10 @@ __pycache__/
 *.pyc
 all_artboards_text.txt
 _charset_source/
+.env
+.env.*
+!.env.example
+.cdn-upload-body*.json
+!.cdn-upload-body.example.json
+.cdn-upload-form*.json
+!.cdn-upload-form.example.json

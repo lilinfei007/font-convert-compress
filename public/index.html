@@ -255,6 +255,17 @@
           </p>
         </section>
 
+        <section class="delivery-panel" aria-label="交付设置">
+          <label id="cdnUploadCard" class="toggle-card delivery-toggle is-disabled" for="uploadToCdn">
+            <input id="uploadToCdn" type="checkbox" disabled />
+            <span>
+              <strong>压缩完成后自动上传 CDN</strong>
+              <small id="cdnUploadHelp">服务端未配置 CDN 上传，当前只会直接下载结果文件。</small>
+            </span>
+          </label>
+          <div id="cdnUploadResult" class="delivery-result is-hidden" aria-live="polite"></div>
+        </section>
+
         <div class="actions">
           <button id="convertButton" class="primary-button" disabled>转换并下载 TTF</button>
           <p id="status" class="status">请选择一个字体文件开始。</p>

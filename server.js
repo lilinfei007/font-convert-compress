@@ -1,7 +1,7 @@
 import { createServer, request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
-import { createHash } from 'node:crypto';
-import { promises as fs } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { existsSync, readFileSync, promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,15 +9,18 @@ import { createFont, woff2 } from 'fonteditor-core';
 
 const require = createRequire(import.meta.url);
 const OTFReader = require('./node_modules/fonteditor-core/lib/ttf/otfreader.js').default;
+const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
+
+loadLocalEnvFiles(APP_DIR);
 
 const HOST = '127.0.0.1';
 const runtimePort =
   typeof process !== 'undefined' && process?.env?.PORT ? Number(process.env.PORT) : 3000;
 const PORT = Number.isFinite(runtimePort) && runtimePort > 0 ? runtimePort : 3000;
 const MAX_BODY_SIZE = 60 * 1024 * 1024;
-const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
-const CHARSET_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'charsets');
-const DATA_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'data');
+const PUBLIC_DIR = path.join(APP_DIR, 'public');
+const CHARSET_DIR = path.join(APP_DIR, 'charsets');
+const DATA_DIR = path.join(APP_DIR, 'data');
 const SOURCE_FONT_DIR = path.join(DATA_DIR, 'source-fonts');
 const FONT_LIBRARY_FILE = path.join(DATA_DIR, 'font-library.json');
 
@@ -65,7 +68,152 @@ const charsetPresets = new Map([
     }
   ]
 ]);
+const CDN_UPLOAD_CONFIG = createCdnUploadConfig();
 let woff2ReadyPromise;
+
+function loadLocalEnvFiles(rootDir) {
+  for (const filename of ['.env.local', '.env']) {
+    const filePath = path.join(rootDir, filename);
+    if (!existsSync(filePath)) {
+      continue;
+    }
+
+    const rawText = readFileSync(filePath, 'utf8');
+    for (const line of rawText.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) {
+        continue;
+      }
+
+      const separatorIndex = trimmed.indexOf('=');
+      if (separatorIndex <= 0) {
+        continue;
+      }
+
+      const key = trimmed.slice(0, separatorIndex).trim();
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || process.env[key] !== undefined) {
+        continue;
+      }
+
+      let value = trimmed.slice(separatorIndex + 1).trim();
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
+      }
+
+      process.env[key] = value.replace(/\\n/g, '\n');
+    }
+  }
+}
+
+function getEnvString(name, fallback = '') {
+  const value = process.env?.[name];
+  return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+}
+
+function getEnvBoolean(name, fallback = false) {
+  const value = getEnvString(name).toLowerCase();
+  if (!value) {
+    return fallback;
+  }
+
+  if (['1', 'true', 'yes', 'on'].includes(value)) {
+    return true;
+  }
+
+  if (['0', 'false', 'no', 'off'].includes(value)) {
+    return false;
+  }
+
+  return fallback;
+}
+
+function getEnvNumber(name, fallback) {
+  const value = Number(getEnvString(name));
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function getEnvJsonObject(name) {
+  const raw = getEnvString(name);
+  if (!raw) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('must be a JSON object');
+    }
+
+    return Object.fromEntries(
+      Object.entries(parsed)
+        .filter(([key, value]) => key && value !== undefined && value !== null)
+        .map(([key, value]) => [key, String(value)])
+    );
+  } catch (error) {
+    console.warn(`Ignoring invalid ${name}:`, error);
+    return {};
+  }
+}
+
+function resolveOptionalConfigPath(filePath) {
+  if (typeof filePath !== 'string' || !filePath.trim()) {
+    return '';
+  }
+
+  const candidate = path.isAbsolute(filePath) ? filePath : path.join(APP_DIR, filePath.trim());
+  const resolved = path.normalize(candidate);
+  return resolved.startsWith(APP_DIR) ? resolved : '';
+}
+
+function readOptionalTemplateText({ inlineValue = '', filePath = '', label = 'template' }) {
+  if (inlineValue) {
+    return inlineValue;
+  }
+
+  const resolvedPath = resolveOptionalConfigPath(filePath);
+  if (!resolvedPath) {
+    return '';
+  }
+
+  try {
+    return readFileSync(resolvedPath, 'utf8');
+  } catch (error) {
+    console.warn(`Failed to read ${label} file:`, error);
+    return '';
+  }
+}
+
+function createCdnUploadConfig() {
+  const uploadUrlTemplate = getEnvString('CDN_UPLOAD_URL_TEMPLATE');
+  const publicUrlTemplate = getEnvString('CDN_PUBLIC_URL_TEMPLATE');
+  const label = getEnvString('CDN_UPLOAD_LABEL', 'CDN');
+  const method = getEnvString('CDN_UPLOAD_METHOD', 'PUT').toUpperCase();
+  const authHeader = getEnvString('CDN_AUTH_HEADER');
+  const authToken = process.env?.CDN_AUTH_TOKEN || '';
+  const bodyMode = getEnvString('CDN_UPLOAD_BODY_MODE', 'raw').toLowerCase();
+
+  return {
+    available: Boolean(uploadUrlTemplate),
+    uploadUrlTemplate,
+    publicUrlTemplate,
+    label,
+    method: ['PUT', 'POST'].includes(method) ? method : 'PUT',
+    authHeader,
+    authToken,
+    extraHeaders: getEnvJsonObject('CDN_UPLOAD_HEADERS_JSON'),
+    autoUploadDefault: getEnvBoolean('CDN_AUTO_UPLOAD_DEFAULT', false),
+    timeoutMs: getEnvNumber('CDN_UPLOAD_TIMEOUT_MS', 20000),
+    bodyMode: ['raw', 'json', 'text', 'form'].includes(bodyMode) ? bodyMode : 'raw',
+    bodyTemplate: getEnvString('CDN_UPLOAD_BODY_TEMPLATE'),
+    bodyTemplateFile: getEnvString('CDN_UPLOAD_BODY_TEMPLATE_FILE'),
+    filenameTemplate: getEnvString('CDN_UPLOAD_FILENAME_TEMPLATE', '{{filename}}'),
+    formFileField: getEnvString('CDN_UPLOAD_FORM_FILE_FIELD', 'file'),
+    formFilenameField: getEnvString('CDN_UPLOAD_FORM_FILENAME_FIELD')
+  };
+}
 
 function sendJson(response, statusCode, payload) {
   response.writeHead(statusCode, {
@@ -585,6 +733,347 @@ function fetchRemoteBuffer(urlString, redirectCount = 0) {
   });
 }
 
+function getPublicRuntimeConfig() {
+  return {
+    cdnUpload: {
+      available: CDN_UPLOAD_CONFIG.available,
+      autoUploadDefault: CDN_UPLOAD_CONFIG.available && CDN_UPLOAD_CONFIG.autoUploadDefault,
+      label: CDN_UPLOAD_CONFIG.label
+    }
+  };
+}
+
+function formatCompactDate(date = new Date()) {
+  const year = String(date.getFullYear());
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}${month}${day}`;
+}
+
+function resolveCdnTemplate(template, values) {
+  return template.replace(/\{([a-zA-Z0-9_]+)\}/g, (_, key) => {
+    const value = values[key];
+    return value === undefined || value === null ? '' : encodeURIComponent(String(value));
+  });
+}
+
+function renderValueTemplate(template, values) {
+  if (typeof template !== 'string') {
+    return template;
+  }
+
+  const exactTokenMatch = template.match(/^\{\{([a-zA-Z0-9_]+)\}\}$/);
+  if (exactTokenMatch) {
+    return values[exactTokenMatch[1]] ?? '';
+  }
+
+  return template.replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (_, key) => {
+    const value = values[key];
+    return value === undefined || value === null ? '' : String(value);
+  });
+}
+
+function renderJsonTemplateValue(value, templateValues) {
+  if (Array.isArray(value)) {
+    return value.map((item) => renderJsonTemplateValue(item, templateValues));
+  }
+
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, nestedValue]) => [key, renderJsonTemplateValue(nestedValue, templateValues)])
+    );
+  }
+
+  if (typeof value === 'string') {
+    return renderValueTemplate(value, templateValues);
+  }
+
+  return value;
+}
+
+function buildCdnTemplateValues(result) {
+  const dateCompact = formatCompactDate();
+  const uuid = randomUUID().replace(/-/g, '');
+  const baseValues = {
+    filename: result.outputName,
+    basename: path.basename(result.outputName, path.extname(result.outputName)),
+    ext: result.outputType,
+    hash: result.outputHash,
+    sourceHash: result.sourceHash,
+    size: result.outputBytes,
+    sourceBytes: result.sourceBytes,
+    subsetCount: result.subsetCount,
+    newSubsetCount: result.newSubsetCount,
+    existingSubsetCount: result.existingSubsetCount,
+    operationMode: result.operationMode,
+    contentType: outputContentTypes.get(result.outputType) || 'application/octet-stream',
+    publicUrl: '',
+    fileBase64: result.buffer.toString('base64'),
+    dateCompact,
+    uuid
+  };
+
+  const renderedCdnFilename = renderValueTemplate(CDN_UPLOAD_CONFIG.filenameTemplate, baseValues);
+  const cdnFilename = String(renderedCdnFilename || result.outputName)
+    .trim()
+    .replace(/\\/g, '/');
+  const cdnBasename = path.posix.basename(cdnFilename);
+  const rawCdnDirname = path.posix.dirname(cdnFilename);
+
+  return {
+    ...baseValues,
+    cdnFilename,
+    cdnBasename,
+    cdnDirname: rawCdnDirname === '.' ? '' : rawCdnDirname
+  };
+}
+
+function readCdnStructuredTemplate(templateValues, label) {
+  const templateText = readOptionalTemplateText({
+    inlineValue: CDN_UPLOAD_CONFIG.bodyTemplate,
+    filePath: CDN_UPLOAD_CONFIG.bodyTemplateFile,
+    label
+  }).trim();
+
+  if (!templateText) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(templateText);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('模板必须是 JSON 对象。');
+    }
+
+    return renderJsonTemplateValue(parsed, templateValues);
+  } catch (error) {
+    throw new Error(
+      `${label} 解析失败：${error instanceof Error ? error.message : 'JSON 无法解析。'}`
+    );
+  }
+}
+
+function serializeMultipartFormData(parts) {
+  const boundary = `----font-converter-${randomUUID().replace(/-/g, '')}`;
+  const chunks = [];
+
+  for (const part of parts) {
+    const safeName = String(part.name || '')
+      .replace(/\r?\n/g, ' ')
+      .replace(/"/g, '\\"');
+    const headers = [`Content-Disposition: form-data; name="${safeName}"`];
+
+    if (part.filename) {
+      const safeFilename = String(part.filename)
+        .replace(/\r?\n/g, ' ')
+        .replace(/"/g, '\\"');
+      headers[0] += `; filename="${safeFilename}"`;
+    }
+
+    if (part.contentType) {
+      headers.push(`Content-Type: ${part.contentType}`);
+    }
+
+    chunks.push(Buffer.from(`--${boundary}\r\n${headers.join('\r\n')}\r\n\r\n`, 'utf8'));
+    chunks.push(Buffer.isBuffer(part.value) ? part.value : Buffer.from(String(part.value ?? ''), 'utf8'));
+    chunks.push(Buffer.from('\r\n', 'utf8'));
+  }
+
+  chunks.push(Buffer.from(`--${boundary}--\r\n`, 'utf8'));
+
+  return {
+    body: Buffer.concat(chunks),
+    contentType: `multipart/form-data; boundary=${boundary}`
+  };
+}
+
+function buildCdnRequestPayload(result, templateValues) {
+  if (CDN_UPLOAD_CONFIG.bodyMode === 'raw') {
+    return {
+      body: result.buffer,
+      contentType: outputContentTypes.get(result.outputType) || 'application/octet-stream'
+    };
+  }
+
+  if (CDN_UPLOAD_CONFIG.bodyMode === 'form') {
+    const structuredFields =
+      readCdnStructuredTemplate(templateValues, 'CDN 上传表单字段模板') || {};
+    const fieldEntries = Object.entries(structuredFields).filter(
+      ([fieldName, fieldValue]) =>
+        fieldName &&
+        fieldValue !== undefined &&
+        fieldValue !== null &&
+        fieldName !== (CDN_UPLOAD_CONFIG.formFileField || 'file') &&
+        fieldName !== CDN_UPLOAD_CONFIG.formFilenameField
+    );
+    const parts = [
+      {
+        name: CDN_UPLOAD_CONFIG.formFileField || 'file',
+        filename: templateValues.cdnBasename || result.outputName,
+        contentType: outputContentTypes.get(result.outputType) || 'application/octet-stream',
+        value: result.buffer
+      }
+    ];
+
+    if (CDN_UPLOAD_CONFIG.formFilenameField) {
+      parts.push({
+        name: CDN_UPLOAD_CONFIG.formFilenameField,
+        value: templateValues.cdnFilename
+      });
+    }
+
+    for (const [fieldName, fieldValue] of fieldEntries) {
+      const value =
+        typeof fieldValue === 'string'
+          ? fieldValue
+          : typeof fieldValue === 'number' || typeof fieldValue === 'boolean'
+            ? String(fieldValue)
+            : JSON.stringify(fieldValue);
+
+      parts.push({
+        name: fieldName,
+        value
+      });
+    }
+
+    return serializeMultipartFormData(parts);
+  }
+
+  const templateText = readOptionalTemplateText({
+    inlineValue: CDN_UPLOAD_CONFIG.bodyTemplate,
+    filePath: CDN_UPLOAD_CONFIG.bodyTemplateFile,
+    label: 'CDN upload body template'
+  }).trim();
+
+  if (!templateText) {
+    throw new Error('CDN 上传已启用自定义请求体，但没有提供模板。');
+  }
+
+  if (CDN_UPLOAD_CONFIG.bodyMode === 'text') {
+    return {
+      body: Buffer.from(String(renderValueTemplate(templateText, templateValues)), 'utf8'),
+      contentType: 'text/plain; charset=utf-8'
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(templateText);
+    const rendered = renderJsonTemplateValue(parsed, templateValues);
+    return {
+      body: Buffer.from(JSON.stringify(rendered), 'utf8'),
+      contentType: 'application/json; charset=utf-8'
+    };
+  } catch (error) {
+    throw new Error(
+      `CDN 上传请求体模板解析失败：${error instanceof Error ? error.message : 'JSON 无法解析。'}`
+    );
+  }
+}
+
+function uploadBufferToUrl(urlString, { method, headers, body, timeoutMs }) {
+  return new Promise((resolve, reject) => {
+    if (!isHttpUrl(urlString)) {
+      reject(new Error('CDN 上传地址只支持 http 或 https。'));
+      return;
+    }
+
+    const url = new URL(urlString);
+    const request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(
+      url,
+      {
+        method,
+        timeout: timeoutMs,
+        headers
+      },
+      (remoteResponse) => {
+        const statusCode = remoteResponse.statusCode || 0;
+        const chunks = [];
+
+        remoteResponse.on('data', (chunk) => {
+          chunks.push(chunk);
+        });
+
+        remoteResponse.on('end', () => {
+          if (statusCode < 200 || statusCode >= 300) {
+            reject(new Error(`CDN 上传失败（HTTP ${statusCode}）。`));
+            return;
+          }
+
+          resolve({
+            statusCode,
+            headers: remoteResponse.headers,
+            body: ''
+          });
+        });
+      }
+    );
+
+    request.on('timeout', () => {
+      request.destroy(new Error('CDN 上传超时。'));
+    });
+    request.on('error', reject);
+    request.end(body);
+  });
+}
+
+async function uploadResultToCdn(result) {
+  const runtime = {
+    requested: true,
+    available: CDN_UPLOAD_CONFIG.available,
+    succeeded: false,
+    publicUrl: '',
+    message: ''
+  };
+
+  if (!CDN_UPLOAD_CONFIG.available) {
+    runtime.message = '服务端未配置 CDN 自动上传。';
+    return runtime;
+  }
+
+  const uploadValues = buildCdnTemplateValues(result);
+  const uploadUrl = resolveCdnTemplate(CDN_UPLOAD_CONFIG.uploadUrlTemplate, uploadValues);
+  const publicUrl = CDN_UPLOAD_CONFIG.publicUrlTemplate
+    ? resolveCdnTemplate(CDN_UPLOAD_CONFIG.publicUrlTemplate, uploadValues)
+    : '';
+  const requestPayload = buildCdnRequestPayload(result, {
+    ...uploadValues,
+    publicUrl
+  });
+  const headers = {
+    'Content-Type': requestPayload.contentType,
+    'Content-Length': String(requestPayload.body.length),
+    'User-Agent': 'font-converter/1.0',
+    ...CDN_UPLOAD_CONFIG.extraHeaders
+  };
+
+  if (CDN_UPLOAD_CONFIG.authHeader && CDN_UPLOAD_CONFIG.authToken) {
+    headers[CDN_UPLOAD_CONFIG.authHeader] = CDN_UPLOAD_CONFIG.authToken;
+  }
+
+  try {
+    await uploadBufferToUrl(uploadUrl, {
+      method: CDN_UPLOAD_CONFIG.method,
+      headers,
+      body: requestPayload.body,
+      timeoutMs: CDN_UPLOAD_CONFIG.timeoutMs
+    });
+
+    runtime.succeeded = true;
+    runtime.publicUrl = publicUrl;
+    runtime.message = publicUrl
+      ? `已上传到 ${CDN_UPLOAD_CONFIG.label}，可通过公开地址访问。`
+      : `已上传到 ${CDN_UPLOAD_CONFIG.label}。`;
+    return runtime;
+  } catch (error) {
+    console.warn('CDN upload failed:', error);
+    runtime.message =
+      error instanceof Error && /HTTP \d+/.test(error.message)
+        ? error.message
+        : `${CDN_UPLOAD_CONFIG.label} 上传失败，请检查服务端配置或网络连接。`;
+    return runtime;
+  }
+}
+
 async function fetchRemoteFontAsPayload(urlString) {
   if (!isHttpUrl(urlString)) {
     throw new Error('网络字体地址只支持 http 或 https。');
@@ -786,6 +1275,7 @@ async function handleConvert(request, response) {
       charsetFileText = '',
       keepHinting = false,
       keepKerning = false,
+      uploadToCdn = false,
       optimize = true
     } = JSON.parse(rawBody);
 
@@ -842,6 +1332,16 @@ async function handleConvert(request, response) {
       outputName: result.outputName,
       outputBytes: result.outputBytes
     });
+    const cdnUpload =
+      uploadToCdn === true || uploadToCdn === 'true'
+        ? await uploadResultToCdn(result)
+        : {
+            requested: false,
+            available: CDN_UPLOAD_CONFIG.available,
+            succeeded: false,
+            publicUrl: '',
+            message: ''
+          };
 
     response.writeHead(200, {
       'Content-Type': outputContentTypes.get(result.outputType) || 'application/octet-stream',
@@ -866,7 +1366,13 @@ async function handleConvert(request, response) {
       'X-Source-Has-Kerning': String(result.sourceFeatures.hasKerningData),
       'X-Source-Glyph-Count': String(result.sourceFeatures.glyphCount),
       'X-Source-Hinting-Tables': result.sourceFeatures.hintingTables.join(','),
-      'X-Source-Kerning-Tables': result.sourceFeatures.kerningTables.join(',')
+      'X-Source-Kerning-Tables': result.sourceFeatures.kerningTables.join(','),
+      'X-Cdn-Upload-Available': String(cdnUpload.available),
+      'X-Cdn-Upload-Requested': String(cdnUpload.requested),
+      'X-Cdn-Upload-Succeeded': String(cdnUpload.succeeded),
+      'X-Cdn-Upload-Label': encodeURIComponent(CDN_UPLOAD_CONFIG.label),
+      'X-Cdn-Upload-Url': encodeURIComponent(cdnUpload.publicUrl),
+      'X-Cdn-Upload-Message': encodeURIComponent(cdnUpload.message)
     });
     response.end(result.buffer);
   } catch (error) {
@@ -1041,7 +1547,8 @@ const server = createServer(async (request, response) => {
     sendJson(response, 200, {
       ok: true,
       supportedTypes: Array.from(supportedTypes),
-      writableTypes: Array.from(writableTypes)
+      writableTypes: Array.from(writableTypes),
+      ...getPublicRuntimeConfig()
     });
     return;
   }

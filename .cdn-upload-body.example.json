@@ -1,0 +1,10 @@
+{
+  "fileName": "{{filename}}",
+  "contentType": "{{contentType}}",
+  "hash": "{{hash}}",
+  "sourceHash": "{{sourceHash}}",
+  "operationMode": "{{operationMode}}",
+  "subsetCount": "{{subsetCount}}",
+  "publicUrl": "{{publicUrl}}",
+  "fileBase64": "{{fileBase64}}"
+}
