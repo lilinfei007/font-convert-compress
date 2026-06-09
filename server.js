@@ -2,9 +2,13 @@ import { createServer, request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createFont, woff2 } from 'fonteditor-core';
+
+const require = createRequire(import.meta.url);
+const OTFReader = require('./node_modules/fonteditor-core/lib/ttf/otfreader.js').default;
 
 const HOST = '127.0.0.1';
 const runtimePort =
@@ -72,6 +76,10 @@ function sendJson(response, statusCode, payload) {
 
 function hashBuffer(buffer) {
   return createHash('sha256').update(buffer).digest('hex');
+}
+
+function bufferToArrayBuffer(buffer) {
+  return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
 }
 
 function sanitizeBaseName(filename) {
@@ -150,6 +158,50 @@ function extractCmapCodePoints(fontObject) {
 
 function codePointsToText(codePoints) {
   return codePoints.map((codePoint) => String.fromCodePoint(codePoint)).join('');
+}
+
+function getOtfMetricIndexes(rawFont) {
+  if (rawFont?.readOptions?.subset?.length) {
+    return Object.keys(rawFont.subsetMap || { 0: true })
+      .map((key) => Number(key))
+      .filter((index) => Number.isInteger(index) && rawFont.hmtx?.[index])
+      .sort((left, right) => left - right);
+  }
+
+  return Array.isArray(rawFont?.hmtx) ? rawFont.hmtx.map((_, index) => index) : [];
+}
+
+function repairOtfGlyphMetrics(fontObject, sourceBuffer, subsetCodePoints) {
+  if (!Array.isArray(fontObject?.glyf) || !Buffer.isBuffer(sourceBuffer)) {
+    return;
+  }
+
+  try {
+    const rawFont = new OTFReader({
+      subset: subsetCodePoints?.length ? subsetCodePoints : []
+    }).readBuffer(bufferToArrayBuffer(sourceBuffer));
+    const metricIndexes = getOtfMetricIndexes(rawFont);
+    const limit = Math.min(fontObject.glyf.length, metricIndexes.length);
+
+    for (let index = 0; index < limit; index += 1) {
+      const glyph = fontObject.glyf[index];
+      const metric = rawFont.hmtx?.[metricIndexes[index]];
+
+      if (!glyph || !metric) {
+        continue;
+      }
+
+      if (Number.isFinite(metric.advanceWidth)) {
+        glyph.advanceWidth = metric.advanceWidth;
+      }
+
+      if (Number.isFinite(metric.leftSideBearing)) {
+        glyph.leftSideBearing = metric.leftSideBearing;
+      }
+    }
+  } catch (error) {
+    console.warn('Failed to repair OTF glyph metrics:', error);
+  }
 }
 
 function createEmptyFontLibrary() {
@@ -583,12 +635,17 @@ async function createFontFromPayload({
     kerning: keepKerning,
     compound2simple: true
   });
+  const fontObject = font.get();
+
+  if (type === 'otf') {
+    repairOtfGlyphMetrics(fontObject, sourceBuffer, subsetCodePoints);
+  }
 
   return {
     type,
     sourceBuffer,
     font,
-    fontObject: font.get()
+    fontObject
   };
 }
 

@@ -17,62 +17,14 @@
       </section>
 
       <section class="panel">
-        <div class="dropzone" id="dropzone">
-          <input
-            id="fontFile"
-            class="file-input"
-            type="file"
-            accept=".ttf,.otf,.woff,.woff2,.eot,.svg"
-          />
-          <div class="dropzone-copy">
-            <p class="dropzone-title">拖入原始全量字体，或点击这里选择</p>
-            <p class="dropzone-hint">原始字体支持：TTF / OTF / WOFF / WOFF2 / EOT / SVG</p>
-          </div>
-        </div>
-
-        <div class="meta-card">
-          <div>
-            <p class="meta-label">原始字体</p>
-            <p id="fileName" class="meta-value">还没有选择文件</p>
-          </div>
-          <div>
-            <p class="meta-label">输出格式</p>
-            <select id="outputFormat" class="format-select" aria-label="输出格式">
-              <option value="ttf" selected>TTF</option>
-              <option value="woff">WOFF</option>
-              <option value="woff2">WOFF2</option>
-              <option value="eot">EOT</option>
-              <option value="svg">SVG</option>
-            </select>
-          </div>
-          <div>
-            <p class="meta-label">处理方式</p>
-            <p class="meta-value">本地 Node 转换</p>
-          </div>
-        </div>
-
-        <div class="source-library">
-          <label class="field source-library-field" for="sourceFontSelect">
-            <span class="field-title">已保存原始字体</span>
-            <select id="sourceFontSelect" class="preset-select"></select>
-          </label>
-          <div class="source-library-actions">
-            <button id="useSavedSourceButton" class="secondary-button" type="button" disabled>使用</button>
-            <button id="deleteSavedSourceButton" class="secondary-button" type="button" disabled>移除</button>
-          </div>
-          <p id="sourceLibraryMeta" class="subset-footnote">正在读取服务端原始字体列表...</p>
-        </div>
-
-        <section class="options-panel" aria-label="字体瘦身选项">
-          <div class="options-copy">
-            <p class="options-eyebrow">Subset Plan</p>
-            <h2>字体切割与瘦身</h2>
-            <p>
-              只保留你真正会用到的字符，是缩小输出字体体积最有效的方法。默认还会去掉 hinting 和
-              kerning，进一步减小文件。
+        <section class="workflow-card workflow-card--mode" aria-label="处理模式">
+          <div class="workflow-copy">
+            <p class="workflow-eyebrow">Workflow</p>
+            <h2 id="operationTitle" class="workflow-title">先选择处理模式</h2>
+            <p id="operationLead" class="workflow-lead">
+              新建子集和增量更新的入口不同，先选模式，下面的步骤会跟着一起变化。
             </p>
           </div>
-
           <div class="operation-switch" role="radiogroup" aria-label="处理模式">
             <label class="source-option" for="operationFresh">
               <input id="operationFresh" type="radio" name="operationMode" value="fresh" checked />
@@ -90,44 +42,125 @@
               </span>
             </label>
           </div>
+        </section>
 
-          <div id="existingSubsetPanel" class="source-panel is-hidden">
-            <label class="field" for="existingSubsetFile">
-              <span class="field-title">当前子集字体</span>
-              <input
-                id="existingSubsetUrl"
-                class="text-input"
-                type="url"
-                inputmode="url"
-                placeholder="可选：填写 http:// 或 https:// 的子集字体地址"
-              />
-              <span class="field-help">
-                如果这里填写了网络地址，系统会优先使用该 URL；留空时才会读取下面上传的本地子集字体。
-              </span>
-              <input
-                id="existingSubsetFile"
-                class="charset-file-input"
-                type="file"
-                accept=".ttf,.otf,.woff,.woff2,.eot,.svg"
-              />
-              <span class="field-help">
-                增量模式下二选一即可。系统会先读取它已有的字符，再和你这次新增的字符做并集。
-              </span>
-            </label>
-            <p id="existingSubsetMeta" class="subset-footnote">还没有选择当前子集字体。</p>
-            <p id="sourceMatchMeta" class="subset-footnote">选择当前子集字体后，会自动匹配曾用于生成它的原始全量字体。</p>
-            <div id="subsetPreviewPanel" class="subset-preview is-hidden" aria-live="polite">
-              <p id="subsetPreviewMeta" class="subset-preview-meta"></p>
-              <div id="subsetPreviewText" class="subset-preview-text" aria-label="当前子集字体字符预览"></div>
-              <div class="subset-preview-actions">
-                <button id="subsetPreviewMore" class="preview-more-button is-hidden" type="button">显示更多字符</button>
-              </div>
+        <section id="existingSubsetPanel" class="workflow-card workflow-card--subset source-panel is-hidden">
+          <div class="workflow-copy">
+            <p class="workflow-eyebrow">Step 1</p>
+            <h2 class="workflow-title">先提供当前子集字体</h2>
+            <p class="workflow-lead">
+              先告诉系统你现在正在使用哪一份子集字体。它会读取已有字符，并尝试自动找回对应的原始全量字体。
+            </p>
+          </div>
+          <label class="field" for="existingSubsetFile">
+            <span class="field-title">当前子集字体</span>
+            <input
+              id="existingSubsetUrl"
+              class="text-input"
+              type="url"
+              inputmode="url"
+              placeholder="可选：填写 http:// 或 https:// 的子集字体地址"
+            />
+            <span class="field-help">
+              如果这里填写了网络地址，系统会优先使用该 URL；留空时才会读取下面上传的本地子集字体。
+            </span>
+            <input
+              id="existingSubsetFile"
+              class="charset-file-input"
+              type="file"
+              accept=".ttf,.otf,.woff,.woff2,.eot,.svg"
+            />
+            <span class="field-help">
+              增量模式下二选一即可。系统会先读取它已有的字符，再和你这次新增的字符做并集。
+            </span>
+          </label>
+          <p id="existingSubsetMeta" class="subset-footnote">还没有选择当前子集字体。</p>
+          <p id="sourceMatchMeta" class="subset-footnote">选择当前子集字体后，会自动匹配曾用于生成它的原始全量字体。</p>
+          <div id="subsetPreviewPanel" class="subset-preview is-hidden" aria-live="polite">
+            <p id="subsetPreviewMeta" class="subset-preview-meta"></p>
+            <div id="subsetPreviewText" class="subset-preview-text" aria-label="当前子集字体字符预览"></div>
+            <div class="subset-preview-actions">
+              <button id="subsetPreviewMore" class="preview-more-button is-hidden" type="button">显示更多字符</button>
             </div>
+          </div>
+        </section>
+
+        <section id="sourceSetupCard" class="workflow-card workflow-card--source" aria-label="原始全量字体">
+          <div class="workflow-copy">
+            <p id="sourceSectionEyebrow" class="workflow-eyebrow">Step 1</p>
+            <h2 id="sourceSectionTitle" class="workflow-title">选择原始全量字体</h2>
+            <p id="sourceSectionLead" class="workflow-lead">
+              上传一份完整字体，或直接复用服务端已保存的原始字体，作为这次压缩的来源。
+            </p>
+          </div>
+
+          <div class="dropzone" id="dropzone">
+            <input
+              id="fontFile"
+              class="file-input"
+              type="file"
+              accept=".ttf,.otf,.woff,.woff2,.eot,.svg"
+            />
+            <div class="dropzone-copy">
+              <p id="dropzoneTitle" class="dropzone-title">拖入原始全量字体，或点击这里选择</p>
+              <p id="dropzoneHint" class="dropzone-hint">原始字体支持：TTF / OTF / WOFF / WOFF2 / EOT / SVG</p>
+            </div>
+          </div>
+
+          <div class="meta-card">
+            <div class="meta-source-card">
+              <div class="meta-source-head">
+                <p class="meta-label">原始字体</p>
+                <span id="sourceStateBadge" class="source-state-badge">待选择</span>
+              </div>
+              <p id="fileName" class="meta-value">还没有选择文件</p>
+              <p id="sourceStateHint" class="meta-footnote">上传后这里会显示当前生效的原始字体来源。</p>
+              <button id="resetSourceButton" class="meta-action-button" type="button" disabled>
+                重置当前选择
+              </button>
+            </div>
+            <div>
+              <p class="meta-label">输出格式</p>
+              <select id="outputFormat" class="format-select" aria-label="输出格式">
+                <option value="ttf" selected>TTF</option>
+                <option value="woff">WOFF</option>
+                <option value="woff2">WOFF2</option>
+                <option value="eot">EOT</option>
+                <option value="svg">SVG</option>
+              </select>
+            </div>
+            <div>
+              <p class="meta-label">处理方式</p>
+              <p class="meta-value">本地 Node 转换</p>
+            </div>
+          </div>
+
+          <div class="source-library">
+            <label class="field source-library-field" for="sourceFontSelect">
+              <span id="sourceLibraryTitle" class="field-title">已保存原始字体</span>
+              <select id="sourceFontSelect" class="preset-select"></select>
+            </label>
+            <div class="source-library-actions">
+              <button id="useSavedSourceButton" class="secondary-button" type="button" disabled>使用</button>
+              <button id="deleteSavedSourceButton" class="secondary-button" type="button" disabled>移除</button>
+            </div>
+            <p id="sourceLibraryMeta" class="subset-footnote">正在读取服务端原始字体列表...</p>
+          </div>
+        </section>
+
+        <section class="options-panel" aria-label="字体瘦身选项">
+          <div class="options-copy">
+            <p id="optionsEyebrow" class="options-eyebrow">Step 2</p>
+            <h2>字体切割与瘦身</h2>
+            <p id="optionsLead">
+              只保留你真正会用到的字符，是缩小输出字体体积最有效的方法。默认还会去掉 hinting 和
+              kerning，进一步减小文件。
+            </p>
           </div>
 
           <div class="source-switch" role="radiogroup" aria-label="字符集来源">
             <label class="source-option" for="modeFull">
-              <input id="modeFull" type="radio" name="subsetMode" value="full" checked />
+              <input id="modeFull" type="radio" name="subsetMode" value="full" />
               <span>
                 <strong>完整字体</strong>
                 <small>不做字符切割，只保留原字体全部字形</small>
@@ -143,7 +176,7 @@
             </label>
 
             <label class="source-option" for="modeManual">
-              <input id="modeManual" type="radio" name="subsetMode" value="manual" />
+              <input id="modeManual" type="radio" name="subsetMode" value="manual" checked />
               <span>
                 <strong>手动输入</strong>
                 <small>自己输入需要保留的字符，适合按项目文案裁剪</small>
@@ -167,7 +200,7 @@
             </label>
           </div>
 
-          <div id="manualPanel" class="source-panel is-hidden">
+          <div id="manualPanel" class="source-panel">
             <label class="field" for="subsetText">
               <span class="field-title">保留字符</span>
               <textarea
@@ -216,8 +249,8 @@
             </label>
           </div>
 
-          <p id="subsetSummary" class="subset-summary">当前保留完整字体，不做字符切割。</p>
-          <p class="subset-footnote">
+          <p id="subsetSummary" class="subset-summary">当前选择手动输入，但还没有填写要保留的字符。</p>
+          <p id="subsetFootnote" class="subset-footnote">
             提醒：很多 OTF 本身并不包含可保留的 hinting 或 kerning 表，这种情况下勾选它们不会改变体积。增量更新时先提供当前子集字体来源（网络地址或本地文件），系统会自动匹配原始全量字体；匹配不到时再在上方手动上传原始全量字体。
           </p>
         </section>

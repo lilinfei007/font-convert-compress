@@ -84,6 +84,112 @@ body {
   pointer-events: none;
 }
 
+.workflow-card {
+  position: relative;
+  margin-top: 20px;
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: rgba(255, 252, 247, 0.9);
+}
+
+.workflow-card:first-child {
+  margin-top: 0;
+}
+
+.workflow-card--mode {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 248, 241, 0.94)),
+    radial-gradient(circle at top right, rgba(191, 79, 47, 0.08), transparent 38%);
+}
+
+.workflow-card--subset {
+  background:
+    linear-gradient(180deg, rgba(255, 252, 247, 0.96), rgba(255, 247, 238, 0.92)),
+    radial-gradient(circle at top right, rgba(191, 79, 47, 0.08), transparent 42%);
+}
+
+.workflow-card--source {
+  transition:
+    border-color 180ms ease,
+    background 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.workflow-card--source[data-source-state="manual"],
+.workflow-card--source[data-source-state="library"] {
+  border-color: rgba(191, 79, 47, 0.34);
+  background:
+    linear-gradient(180deg, rgba(255, 252, 247, 0.96), rgba(255, 244, 234, 0.94)),
+    radial-gradient(circle at top right, rgba(191, 79, 47, 0.14), transparent 42%);
+  box-shadow:
+    0 22px 42px rgba(140, 51, 25, 0.1),
+    inset 0 0 0 1px rgba(191, 79, 47, 0.08);
+}
+
+.workflow-card--source[data-source-state="matched"] {
+  border-color: rgba(41, 98, 68, 0.38);
+  background:
+    linear-gradient(180deg, rgba(250, 255, 251, 0.98), rgba(239, 250, 244, 0.95)),
+    radial-gradient(circle at top right, rgba(41, 98, 68, 0.14), transparent 42%);
+  box-shadow:
+    0 24px 46px rgba(41, 98, 68, 0.12),
+    inset 0 0 0 1px rgba(41, 98, 68, 0.08);
+}
+
+.panel.is-incremental-mode .workflow-card--source {
+  border-style: dashed;
+  background: rgba(255, 250, 244, 0.8);
+}
+
+.panel.is-incremental-mode .workflow-card--source.is-ready {
+  border-style: solid;
+  background:
+    linear-gradient(180deg, rgba(255, 252, 247, 0.95), rgba(255, 248, 241, 0.92)),
+    radial-gradient(circle at top right, rgba(41, 98, 68, 0.08), transparent 38%);
+}
+
+.panel.is-incremental-mode .workflow-card--source[data-source-state="manual"],
+.panel.is-incremental-mode .workflow-card--source[data-source-state="library"] {
+  border-style: solid;
+  border-color: rgba(191, 79, 47, 0.34);
+  background:
+    linear-gradient(180deg, rgba(255, 252, 247, 0.96), rgba(255, 244, 234, 0.94)),
+    radial-gradient(circle at top right, rgba(191, 79, 47, 0.14), transparent 42%);
+}
+
+.panel.is-incremental-mode .workflow-card--source[data-source-state="matched"] {
+  border-style: solid;
+  border-color: rgba(41, 98, 68, 0.38);
+  background:
+    linear-gradient(180deg, rgba(250, 255, 251, 0.98), rgba(239, 250, 244, 0.95)),
+    radial-gradient(circle at top right, rgba(41, 98, 68, 0.14), transparent 42%);
+}
+
+.workflow-copy {
+  max-width: 720px;
+}
+
+.workflow-eyebrow {
+  margin: 0;
+  font-size: 0.78rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--primary-deep);
+}
+
+.workflow-title {
+  margin: 8px 0 10px;
+  font-size: clamp(1.45rem, 3.4vw, 2rem);
+  font-family: Georgia, "Times New Roman", serif;
+}
+
+.workflow-lead {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
 .dropzone {
   position: relative;
   display: grid;
@@ -105,6 +211,10 @@ body {
     transform 180ms ease,
     border-color 180ms ease,
     box-shadow 180ms ease;
+}
+
+.workflow-card--source .dropzone {
+  margin-top: 18px;
 }
 
 .dropzone.is-active {
@@ -150,10 +260,76 @@ body {
   background: var(--panel-strong);
 }
 
+.meta-source-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: hidden;
+  transition:
+    border-color 180ms ease,
+    background 180ms ease,
+    box-shadow 180ms ease,
+    transform 180ms ease;
+}
+
+.meta-source-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 7px;
+  border-radius: 18px 0 0 18px;
+  background: transparent;
+  transition: background 180ms ease;
+}
+
+.meta-source-card[data-source-state="manual"],
+.meta-source-card[data-source-state="library"] {
+  border-color: rgba(191, 79, 47, 0.38);
+  background:
+    linear-gradient(180deg, rgba(255, 249, 243, 0.98), rgba(255, 241, 230, 0.94)),
+    radial-gradient(circle at top right, rgba(191, 79, 47, 0.18), transparent 54%);
+  box-shadow:
+    0 16px 28px rgba(140, 51, 25, 0.12),
+    inset 0 0 0 1px rgba(191, 79, 47, 0.08);
+  transform: translateY(-1px);
+}
+
+.meta-source-card[data-source-state="manual"]::before,
+.meta-source-card[data-source-state="library"]::before {
+  background: linear-gradient(180deg, rgba(191, 79, 47, 0.94), rgba(140, 51, 25, 0.82));
+}
+
+.meta-source-card[data-source-state="matched"] {
+  border-color: rgba(41, 98, 68, 0.42);
+  background:
+    linear-gradient(180deg, rgba(246, 255, 249, 0.99), rgba(232, 247, 238, 0.95)),
+    radial-gradient(circle at top right, rgba(41, 98, 68, 0.2), transparent 52%);
+  box-shadow:
+    0 18px 30px rgba(41, 98, 68, 0.14),
+    inset 0 0 0 1px rgba(41, 98, 68, 0.08);
+  transform: translateY(-1px);
+}
+
+.meta-source-card[data-source-state="matched"]::before {
+  background: linear-gradient(180deg, rgba(41, 98, 68, 0.96), rgba(29, 82, 54, 0.82));
+}
+
+.meta-source-head {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+
 .meta-label {
   margin: 0 0 8px;
   font-size: 0.84rem;
   color: var(--muted);
+}
+
+.meta-source-head .meta-label {
+  margin-bottom: 0;
 }
 
 .meta-value {
@@ -161,6 +337,105 @@ body {
   font-size: 1rem;
   font-weight: 600;
   word-break: break-word;
+}
+
+.meta-source-card[data-source-state="manual"] .meta-value,
+.meta-source-card[data-source-state="library"] .meta-value,
+.meta-source-card[data-source-state="matched"] .meta-value {
+  padding: 14px 16px;
+  border-radius: 16px;
+  font-size: 1.14rem;
+  font-weight: 800;
+  line-height: 1.45;
+}
+
+.meta-source-card[data-source-state="manual"] .meta-value,
+.meta-source-card[data-source-state="library"] .meta-value {
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--primary-deep);
+}
+
+.meta-source-card[data-source-state="matched"] .meta-value {
+  background: rgba(255, 255, 255, 0.78);
+  color: var(--success);
+}
+
+.source-state-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  background: rgba(53, 41, 33, 0.06);
+  color: var(--muted);
+}
+
+.source-state-badge::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.78;
+}
+
+.meta-source-card[data-source-state="empty"] .source-state-badge,
+.meta-source-card[data-source-state="pending-match"] .source-state-badge {
+  background: rgba(53, 41, 33, 0.06);
+  color: var(--muted);
+}
+
+.meta-source-card[data-source-state="manual"] .source-state-badge,
+.meta-source-card[data-source-state="library"] .source-state-badge {
+  background: rgba(191, 79, 47, 0.14);
+  color: var(--primary-deep);
+  box-shadow: inset 0 0 0 1px rgba(191, 79, 47, 0.16);
+}
+
+.meta-source-card[data-source-state="matched"] .source-state-badge {
+  background: rgba(41, 98, 68, 0.14);
+  color: var(--success);
+  box-shadow: inset 0 0 0 1px rgba(41, 98, 68, 0.16);
+}
+
+.meta-footnote {
+  margin: 0;
+  font-size: 0.92rem;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.meta-source-card[data-source-state="manual"] .meta-footnote,
+.meta-source-card[data-source-state="library"] .meta-footnote,
+.meta-source-card[data-source-state="matched"] .meta-footnote {
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.meta-action-button {
+  align-self: flex-start;
+  margin-top: auto;
+  padding: 0;
+  border: none;
+  font: inherit;
+  font-weight: 700;
+  color: var(--primary-deep);
+  background: none;
+  cursor: pointer;
+}
+
+.meta-action-button:hover:not(:disabled) {
+  color: var(--primary);
+}
+
+.meta-action-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .source-library {
@@ -181,6 +456,7 @@ body {
 
 .source-library-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
 }
 
@@ -538,12 +814,22 @@ body {
     border-radius: 22px;
   }
 
+  .workflow-card {
+    padding: 18px;
+    border-radius: 22px;
+  }
+
   .dropzone {
     min-height: 220px;
   }
 
   .meta-card {
     grid-template-columns: 1fr;
+  }
+
+  .meta-source-head {
+    align-items: flex-start;
+    flex-wrap: wrap;
   }
 
   .source-library {
