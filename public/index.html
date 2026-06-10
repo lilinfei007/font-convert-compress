@@ -263,6 +263,41 @@
               <small id="cdnUploadHelp">服务端未配置 CDN 上传，当前只会直接下载结果文件。</small>
             </span>
           </label>
+          <section id="cdnFilenameModePanel" class="delivery-mode-panel is-hidden" aria-live="polite">
+            <div class="delivery-mode-copy">
+              <p class="delivery-mode-title">CDN 文件名策略</p>
+              <p id="cdnFilenameModeLead" class="delivery-mode-lead">
+                当前子集字体来自网络地址时，你可以选择覆盖原 CDN 文件，或生成一个新的随机地址。
+              </p>
+            </div>
+            <div class="delivery-mode-options">
+              <label class="source-option delivery-option" for="cdnFilenameModeExisting">
+                <input
+                  id="cdnFilenameModeExisting"
+                  type="radio"
+                  name="cdnFilenameMode"
+                  value="existing"
+                  checked
+                />
+                <span>
+                  <strong>沿用当前 URL 文件名</strong>
+                  <small>适合直接覆盖同一个 CDN 文件；如果当前输出格式不同，会沿用原路径并自动替换扩展名。</small>
+                </span>
+              </label>
+              <label class="source-option delivery-option" for="cdnFilenameModeTemplate">
+                <input
+                  id="cdnFilenameModeTemplate"
+                  type="radio"
+                  name="cdnFilenameMode"
+                  value="template"
+                />
+                <span>
+                  <strong>生成新的随机文件名</strong>
+                  <small>继续按服务端的 CDN_UPLOAD_FILENAME_TEMPLATE 生成，适合保留旧版本并产出新地址。</small>
+                </span>
+              </label>
+            </div>
+          </section>
           <div id="cdnUploadResult" class="delivery-result is-hidden" aria-live="polite"></div>
         </section>
 

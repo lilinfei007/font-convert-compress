@@ -53,8 +53,11 @@ const uploadToCdn = document.querySelector('#uploadToCdn');
 const cdnUploadCard = document.querySelector('#cdnUploadCard');
 const cdnUploadHelp = document.querySelector('#cdnUploadHelp');
 const cdnUploadResult = document.querySelector('#cdnUploadResult');
+const cdnFilenameModePanel = document.querySelector('#cdnFilenameModePanel');
+const cdnFilenameModeLead = document.querySelector('#cdnFilenameModeLead');
 const subsetModeInputs = Array.from(document.querySelectorAll('input[name="subsetMode"]'));
 const operationModeInputs = Array.from(document.querySelectorAll('input[name="operationMode"]'));
+const cdnFilenameModeInputs = Array.from(document.querySelectorAll('input[name="cdnFilenameMode"]'));
 
 const OUTPUT_FORMAT_LABELS = {
   ttf: 'TTF',
@@ -171,6 +174,30 @@ function updateCdnUploadCardState() {
   cdnUploadCard.classList.toggle('is-checked', available && uploadToCdn.checked);
 }
 
+function updateCdnFilenameModePanel() {
+  const visible =
+    runtimeConfigState.cdnUploadAvailable &&
+    !uploadToCdn.disabled &&
+    uploadToCdn.checked &&
+    getSelectedOperationMode() === 'incremental' &&
+    Boolean(getExistingSubsetUrlValue());
+
+  cdnFilenameModePanel.classList.toggle('is-hidden', !visible);
+
+  if (!visible) {
+    return;
+  }
+
+  const urlInfo = getExistingSubsetUrlFileInfo();
+  const currentName = urlInfo?.basename || '当前 URL 文件';
+  const resolvedName = urlInfo?.resolvedBasename || '';
+
+  cdnFilenameModeLead.textContent =
+    resolvedName && resolvedName !== currentName
+      ? `当前 URL 指向 ${currentName}。如果继续沿用原文件名，本次会保留原路径并自动改成 ${resolvedName}。`
+      : '当前子集字体来自网络地址。你可以直接覆盖这份 CDN 文件，或生成一个新的随机地址。';
+}
+
 function applyRuntimeConfig(payload) {
   const cdnConfig =
     payload?.cdnUpload && typeof payload.cdnUpload === 'object' ? payload.cdnUpload : {};
@@ -188,6 +215,7 @@ function applyRuntimeConfig(payload) {
     ? `服务端已连接 ${runtimeConfigState.cdnUploadLabel}。勾选后会在转换完成后由服务端代为上传，敏感凭据不会下发到浏览器。`
     : '服务端未配置 CDN 上传，当前只会直接下载结果文件。';
   updateCdnUploadCardState();
+  updateCdnFilenameModePanel();
 }
 
 async function loadRuntimeConfig() {
@@ -210,6 +238,7 @@ async function loadRuntimeConfig() {
     cdnUploadHelp.textContent =
       error instanceof Error ? `${error.message} 当前只会直接下载结果文件。` : '当前只会直接下载结果文件。';
     updateCdnUploadCardState();
+    updateCdnFilenameModePanel();
   }
 }
 
@@ -286,12 +315,51 @@ function getSelectedOutputLabel() {
   return OUTPUT_FORMAT_LABELS[getSelectedOutputFormat()] || 'TTF';
 }
 
+function getSelectedCdnFilenameMode() {
+  return cdnFilenameModeInputs.find((input) => input.checked)?.value || 'existing';
+}
+
 function getSelectedPreset() {
   return charsetPresets.find((preset) => preset.id === presetSelect.value) || null;
 }
 
 function getExistingSubsetUrlValue() {
   return existingSubsetUrl.value.trim();
+}
+
+function getExistingSubsetUrlFileInfo() {
+  const remoteUrl = getExistingSubsetUrlValue();
+
+  if (!remoteUrl) {
+    return null;
+  }
+
+  try {
+    const url = new URL(remoteUrl);
+    const pathname = decodeURIComponent(url.pathname || '').replace(/\\/g, '/');
+
+    if (!pathname || pathname === '/' || pathname.endsWith('/')) {
+      return null;
+    }
+
+    const normalizedOutputExt = getSelectedOutputFormat().toLowerCase();
+    const currentExt = pathname.match(/\.([^.\/]+)$/)?.[1]?.toLowerCase() || '';
+    const resolvedPath =
+      currentExt && currentExt !== normalizedOutputExt
+        ? pathname.replace(/\.[^.\/]+$/, `.${normalizedOutputExt}`)
+        : currentExt
+          ? pathname
+          : `${pathname}.${normalizedOutputExt}`;
+
+    return {
+      pathname,
+      basename: pathname.split('/').pop() || '',
+      resolvedPath,
+      resolvedBasename: resolvedPath.split('/').pop() || ''
+    };
+  } catch {
+    return null;
+  }
 }
 
 function getExistingSubsetMatchTarget() {
@@ -630,6 +698,7 @@ function updateOperationPanels() {
   updateConvertButtonLabel();
   updateSourceFontMeta();
   updateConvertButtonState();
+  updateCdnFilenameModePanel();
 
   const target = getExistingSubsetMatchTarget();
   if (operationMode !== 'incremental') {
@@ -1394,6 +1463,11 @@ async function getExistingSubsetPayload() {
 async function convertSelectedFile() {
   const operationMode = getSelectedOperationMode();
   const shouldUploadToCdn = !uploadToCdn.disabled && uploadToCdn.checked;
+  const shouldReuseOriginalCdnFilename =
+    shouldUploadToCdn &&
+    operationMode === 'incremental' &&
+    Boolean(getExistingSubsetUrlValue()) &&
+    getSelectedCdnFilenameMode() === 'existing';
 
   if (operationMode === 'fresh' && !hasSourceFontForCurrentOperation()) {
     updateStatus('请先上传原始全量字体，或从已保存原始字体中选择一个。', 'error');
@@ -1416,17 +1490,18 @@ async function convertSelectedFile() {
     const existingSubsetPayload =
       operationMode === 'incremental' ? await getExistingSubsetPayload() : null;
     const sourcePayload = await getSourceFontPayload(operationMode);
+    const cdnUploadLead = shouldUploadToCdn
+      ? shouldReuseOriginalCdnFilename
+        ? `，并准备覆盖 ${runtimeConfigState.cdnUploadLabel} 原文件`
+        : `，并准备上传到 ${runtimeConfigState.cdnUploadLabel}`
+      : '';
 
     const jobLabel =
       operationMode === 'incremental'
-        ? `正在基于当前子集字体增量更新为 ${outputLabel}${
-            shouldUploadToCdn ? `，并准备上传到 ${runtimeConfigState.cdnUploadLabel}` : ''
-          }，并合并 ${subsetPayload.label}，请稍候...`
+        ? `正在基于当前子集字体增量更新为 ${outputLabel}${cdnUploadLead}，并合并 ${subsetPayload.label}，请稍候...`
         : subsetPayload.subsetMode === 'full'
-          ? `正在转换完整字体为 ${outputLabel}${shouldUploadToCdn ? `，并准备上传到 ${runtimeConfigState.cdnUploadLabel}` : ''}，请稍候...`
-          : `正在使用 ${subsetPayload.label} 压缩并转换为 ${outputLabel}${
-              shouldUploadToCdn ? `，并准备上传到 ${runtimeConfigState.cdnUploadLabel}` : ''
-            }，请稍候...`;
+          ? `正在转换完整字体为 ${outputLabel}${cdnUploadLead}，请稍候...`
+          : `正在使用 ${subsetPayload.label} 压缩并转换为 ${outputLabel}${cdnUploadLead}，请稍候...`;
     updateStatus(jobLabel, 'busy');
 
     const response = await fetch('/api/convert', {
@@ -1449,7 +1524,11 @@ async function convertSelectedFile() {
         charsetFileText: subsetPayload.charsetFileText,
         keepHinting: keepHinting.checked,
         keepKerning: keepKerning.checked,
-        uploadToCdn: shouldUploadToCdn
+        uploadToCdn: shouldUploadToCdn,
+        cdnFilenameMode:
+          shouldUploadToCdn && operationMode === 'incremental' && existingSubsetPayload?.url
+            ? getSelectedCdnFilenameMode()
+            : 'template'
       })
     });
 
@@ -1482,6 +1561,7 @@ async function convertSelectedFile() {
     );
     const cdnUploadUrl = decodeURIComponent(response.headers.get('X-Cdn-Upload-Url') || '');
     const cdnUploadMessage = decodeURIComponent(response.headers.get('X-Cdn-Upload-Message') || '');
+    const cdnUploadFilenameMode = response.headers.get('X-Cdn-Upload-Filename-Mode') || '';
     const fallbackName = `${sourcePayload.filename.replace(/\.[^.]+$/, '') || 'converted-font'}.${responseOutputType}`;
     const outputName = decodeURIComponent(
       contentDisposition.match(/filename="(.+?)"/)?.[1] || fallbackName
@@ -1528,6 +1608,11 @@ async function convertSelectedFile() {
     }
     if (cdnUploadRequested && cdnUploadSucceeded) {
       notes.push(`已自动上传到 ${cdnUploadLabel}`);
+      if (cdnUploadFilenameMode === 'existing') {
+        notes.push('沿用了当前 URL 文件名');
+      } else if (cdnUploadFilenameMode === 'template' && operationModeHeader === 'incremental' && existingSubsetPayload?.url) {
+        notes.push('生成了新的 CDN 文件名');
+      }
       setCdnUploadResult({
         tone: 'success',
         message: cdnUploadMessage || `已同步到 ${cdnUploadLabel}。`,
@@ -1562,6 +1647,7 @@ function syncUI() {
   updateOperationPanels();
   updateSourcePanels();
   updateSubsetSummary();
+  updateCdnFilenameModePanel();
 }
 
 fileInput.addEventListener('change', () => {
@@ -1582,10 +1668,12 @@ operationModeInputs.forEach((input) => {
 
 outputFormat.addEventListener('change', () => {
   updateConvertButtonLabel();
+  updateCdnFilenameModePanel();
 });
 
 uploadToCdn.addEventListener('change', () => {
   updateCdnUploadCardState();
+  updateCdnFilenameModePanel();
 });
 
 sourceFontSelect.addEventListener('change', () => {
@@ -1703,6 +1791,7 @@ existingSubsetFile.addEventListener('change', async () => {
     clearMatchedSource();
     clearSubsetPreview();
     updateSubsetSummary();
+    updateCdnFilenameModePanel();
     return;
   }
 
@@ -1716,11 +1805,13 @@ existingSubsetFile.addEventListener('change', async () => {
     }
     scheduleSubsetPreview();
     updateSubsetSummary();
+    updateCdnFilenameModePanel();
   } catch (error) {
     existingSubsetMeta.textContent = error instanceof Error ? error.message : '当前子集字体读取失败。';
     updateStatus(existingSubsetMeta.textContent, 'error');
     clearMatchedSource('当前子集字体读取失败，请重新选择。');
     clearSubsetPreview();
+    updateCdnFilenameModePanel();
   }
 });
 
@@ -1734,6 +1825,7 @@ existingSubsetUrl.addEventListener('input', () => {
   }
   scheduleSubsetPreview();
   updateSubsetSummary();
+  updateCdnFilenameModePanel();
 });
 
 convertButton.addEventListener('click', () => {

@@ -757,6 +757,54 @@ function resolveCdnTemplate(template, values) {
   });
 }
 
+function deriveCdnFilenameFromExistingUrl(urlString, outputType) {
+  if (!isHttpUrl(urlString)) {
+    return '';
+  }
+
+  try {
+    const url = new URL(urlString);
+    const pathname = decodeURIComponent(url.pathname || '').replace(/\\/g, '/').trim();
+
+    if (!pathname || pathname === '/' || pathname.endsWith('/')) {
+      return '';
+    }
+
+    const currentExt = path.posix.extname(pathname);
+
+    if (currentExt.toLowerCase() === `.${outputType}`) {
+      return pathname;
+    }
+
+    if (currentExt) {
+      return `${pathname.slice(0, -currentExt.length)}.${outputType}`;
+    }
+
+    return `${pathname}.${outputType}`;
+  } catch {
+    return '';
+  }
+}
+
+function buildPublicUrlFromExistingUrl(urlString, filename) {
+  if (!isHttpUrl(urlString) || !filename) {
+    return '';
+  }
+
+  try {
+    const url = new URL(urlString);
+    url.pathname = filename
+      .split('/')
+      .map((segment, index) => (index === 0 && segment === '' ? '' : encodeURIComponent(segment)))
+      .join('/');
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return '';
+  }
+}
+
 function renderValueTemplate(template, values) {
   if (typeof template !== 'string') {
     return template;
@@ -791,7 +839,7 @@ function renderJsonTemplateValue(value, templateValues) {
   return value;
 }
 
-function buildCdnTemplateValues(result) {
+function buildCdnTemplateValues(result, uploadContext = {}) {
   const dateCompact = formatCompactDate();
   const uuid = randomUUID().replace(/-/g, '');
   const baseValues = {
@@ -813,15 +861,26 @@ function buildCdnTemplateValues(result) {
     uuid
   };
 
-  const renderedCdnFilename = renderValueTemplate(CDN_UPLOAD_CONFIG.filenameTemplate, baseValues);
-  const cdnFilename = String(renderedCdnFilename || result.outputName)
+  const renderedTemplateFilename = renderValueTemplate(CDN_UPLOAD_CONFIG.filenameTemplate, baseValues);
+  const templateCdnFilename = String(renderedTemplateFilename || result.outputName)
     .trim()
     .replace(/\\/g, '/');
+  const existingCdnFilename =
+    result.operationMode === 'incremental'
+      ? deriveCdnFilenameFromExistingUrl(uploadContext.existingSubsetUrl || '', result.outputType)
+      : '';
+  const requestedFilenameMode = uploadContext.cdnFilenameMode === 'existing' ? 'existing' : 'template';
+  const cdnFilenameMode =
+    requestedFilenameMode === 'existing' && existingCdnFilename ? 'existing' : 'template';
+  const cdnFilename = cdnFilenameMode === 'existing' ? existingCdnFilename : templateCdnFilename;
   const cdnBasename = path.posix.basename(cdnFilename);
   const rawCdnDirname = path.posix.dirname(cdnFilename);
 
   return {
     ...baseValues,
+    cdnFilenameMode,
+    templateCdnFilename,
+    existingCdnFilename,
     cdnFilename,
     cdnBasename,
     cdnDirname: rawCdnDirname === '.' ? '' : rawCdnDirname
@@ -1016,13 +1075,14 @@ function uploadBufferToUrl(urlString, { method, headers, body, timeoutMs }) {
   });
 }
 
-async function uploadResultToCdn(result) {
+async function uploadResultToCdn(result, uploadContext = {}) {
   const runtime = {
     requested: true,
     available: CDN_UPLOAD_CONFIG.available,
     succeeded: false,
     publicUrl: '',
-    message: ''
+    message: '',
+    filenameMode: 'template'
   };
 
   if (!CDN_UPLOAD_CONFIG.available) {
@@ -1030,11 +1090,14 @@ async function uploadResultToCdn(result) {
     return runtime;
   }
 
-  const uploadValues = buildCdnTemplateValues(result);
+  const uploadValues = buildCdnTemplateValues(result, uploadContext);
+  runtime.filenameMode = uploadValues.cdnFilenameMode;
   const uploadUrl = resolveCdnTemplate(CDN_UPLOAD_CONFIG.uploadUrlTemplate, uploadValues);
   const publicUrl = CDN_UPLOAD_CONFIG.publicUrlTemplate
     ? resolveCdnTemplate(CDN_UPLOAD_CONFIG.publicUrlTemplate, uploadValues)
-    : '';
+    : uploadValues.cdnFilenameMode === 'existing'
+      ? buildPublicUrlFromExistingUrl(uploadContext.existingSubsetUrl || '', uploadValues.cdnFilename)
+      : '';
   const requestPayload = buildCdnRequestPayload(result, {
     ...uploadValues,
     publicUrl
@@ -1060,9 +1123,14 @@ async function uploadResultToCdn(result) {
 
     runtime.succeeded = true;
     runtime.publicUrl = publicUrl;
-    runtime.message = publicUrl
-      ? `已上传到 ${CDN_UPLOAD_CONFIG.label}，可通过公开地址访问。`
-      : `已上传到 ${CDN_UPLOAD_CONFIG.label}。`;
+    runtime.message =
+      uploadValues.cdnFilenameMode === 'existing'
+        ? publicUrl
+          ? `已上传到 ${CDN_UPLOAD_CONFIG.label}，并沿用原文件名覆盖原地址。`
+          : `已上传到 ${CDN_UPLOAD_CONFIG.label}，并沿用原文件名。`
+        : publicUrl
+          ? `已上传到 ${CDN_UPLOAD_CONFIG.label}，可通过公开地址访问。`
+          : `已上传到 ${CDN_UPLOAD_CONFIG.label}。`;
     return runtime;
   } catch (error) {
     console.warn('CDN upload failed:', error);
@@ -1276,6 +1344,7 @@ async function handleConvert(request, response) {
       keepHinting = false,
       keepKerning = false,
       uploadToCdn = false,
+      cdnFilenameMode = 'template',
       optimize = true
     } = JSON.parse(rawBody);
 
@@ -1334,13 +1403,17 @@ async function handleConvert(request, response) {
     });
     const cdnUpload =
       uploadToCdn === true || uploadToCdn === 'true'
-        ? await uploadResultToCdn(result)
+        ? await uploadResultToCdn(result, {
+            existingSubsetUrl: typeof existingSubsetUrl === 'string' ? existingSubsetUrl : '',
+            cdnFilenameMode: typeof cdnFilenameMode === 'string' ? cdnFilenameMode : 'template'
+          })
         : {
             requested: false,
             available: CDN_UPLOAD_CONFIG.available,
             succeeded: false,
             publicUrl: '',
-            message: ''
+            message: '',
+            filenameMode: 'template'
           };
 
     response.writeHead(200, {
@@ -1372,7 +1445,8 @@ async function handleConvert(request, response) {
       'X-Cdn-Upload-Succeeded': String(cdnUpload.succeeded),
       'X-Cdn-Upload-Label': encodeURIComponent(CDN_UPLOAD_CONFIG.label),
       'X-Cdn-Upload-Url': encodeURIComponent(cdnUpload.publicUrl),
-      'X-Cdn-Upload-Message': encodeURIComponent(cdnUpload.message)
+      'X-Cdn-Upload-Message': encodeURIComponent(cdnUpload.message),
+      'X-Cdn-Upload-Filename-Mode': cdnUpload.filenameMode
     });
     response.end(result.buffer);
   } catch (error) {

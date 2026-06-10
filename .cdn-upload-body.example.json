@@ -1,9 +1,10 @@
 {
-  "fileName": "{{filename}}",
+  "fileName": "{{cdnFilename}}",
   "contentType": "{{contentType}}",
   "hash": "{{hash}}",
   "sourceHash": "{{sourceHash}}",
   "operationMode": "{{operationMode}}",
+  "cdnFilenameMode": "{{cdnFilenameMode}}",
   "subsetCount": "{{subsetCount}}",
   "publicUrl": "{{publicUrl}}",
   "fileBase64": "{{fileBase64}}"
