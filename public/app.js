@@ -14,6 +14,11 @@ const dropzoneHint = document.querySelector('#dropzoneHint');
 const optionsEyebrow = document.querySelector('#optionsEyebrow');
 const optionsLead = document.querySelector('#optionsLead');
 const subsetFootnote = document.querySelector('#subsetFootnote');
+const preflightPanel = document.querySelector('#preflightPanel');
+const preflightBadge = document.querySelector('#preflightBadge');
+const preflightSummary = document.querySelector('#preflightSummary');
+const preflightChecklist = document.querySelector('#preflightChecklist');
+const preflightFeatureNotes = document.querySelector('#preflightFeatureNotes');
 const sourceStateBadge = document.querySelector('#sourceStateBadge');
 const sourceStateHint = document.querySelector('#sourceStateHint');
 const sourceFontSelect = document.querySelector('#sourceFontSelect');
@@ -88,6 +93,8 @@ const PREVIEW_BATCH_SIZE = 600;
 
 let selectedFile = null;
 let charsetPresets = [];
+let charsetFileLoadState = 'idle';
+let charsetFileLoadError = '';
 let charsetFileState = {
   name: '',
   size: 0,
@@ -106,6 +113,7 @@ let selectedLibrarySource = null;
 let matchedSourceState = null;
 let sourceMatchRequestId = 0;
 let sourceMatchTimer = 0;
+let sourceInspectionRequestId = 0;
 let subsetPreviewRequestId = 0;
 let subsetPreviewTimer = 0;
 let subsetPreviewTargetKey = '';
@@ -115,6 +123,13 @@ let runtimeConfigState = {
   cdnUploadAvailable: false,
   cdnUploadDefault: false,
   cdnUploadLabel: 'CDN'
+};
+let sourceInspectionState = {
+  key: '',
+  status: 'idle',
+  sourceLabel: '',
+  payload: null,
+  error: ''
 };
 const previewStates = {
   subset: {
@@ -446,6 +461,10 @@ function getExistingSubsetMatchTarget() {
   const remoteUrl = getExistingSubsetUrlValue();
 
   if (remoteUrl) {
+    if (!isValidRemoteFontUrl(remoteUrl)) {
+      return null;
+    }
+
     return {
       type: 'url',
       key: `url:${remoteUrl}`,
@@ -482,12 +501,428 @@ function hasSourceFontForCurrentOperation() {
   return Boolean(hasExplicitSourceSelection() || matchedSourceState?.sourceHash);
 }
 
-function updateConvertButtonState() {
-  const operationMode = getSelectedOperationMode();
-  const hasRequiredSource = hasSourceFontForCurrentOperation();
-  const hasRequiredSubset = operationMode !== 'incremental' || hasExistingSubsetSource();
+function isMatchingCachedFileState(fileState, file) {
+  return Boolean(
+    file &&
+      fileState.name === file.name &&
+      fileState.size === file.size &&
+      fileState.lastModified === file.lastModified
+  );
+}
 
-  convertButton.disabled = !hasRequiredSource || !hasRequiredSubset;
+function isValidRemoteFontUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function getSubsetModeValidationState() {
+  const subsetMode = getSelectedSubsetMode();
+
+  if (subsetMode === 'full') {
+    return {
+      ready: true,
+      message: '本次会保留完整字体，不做字符切割。'
+    };
+  }
+
+  if (subsetMode === 'preset') {
+    const preset = getSelectedPreset();
+    return preset
+      ? {
+          ready: true,
+          message: `系统预设已就绪：${preset.name}，共 ${preset.count} 个汉字。`
+        }
+      : {
+          ready: false,
+          message: '系统预设还没加载完成，请稍后再试。'
+        };
+  }
+
+  if (subsetMode === 'manual') {
+    const characters = getSubsetCharacters(subsetText.value);
+    return characters.length
+      ? {
+          ready: true,
+          message: `手动字符已准备好，识别到 ${characters.length} 个唯一字符。`
+        }
+      : {
+          ready: false,
+          message: '请先输入这次要保留的字符。'
+        };
+  }
+
+  const file = charsetFile.files?.[0];
+
+  if (!file) {
+    return {
+      ready: false,
+      message: '请先上传字符集文件。'
+    };
+  }
+
+  if (charsetFileLoadState === 'loading' || !isMatchingCachedFileState(charsetFileState, file)) {
+    return {
+      ready: false,
+      message: `正在读取字符集文件 ${file.name}，请稍候。`
+    };
+  }
+
+  if (charsetFileLoadState === 'error') {
+    return {
+      ready: false,
+      message: charsetFileLoadError || '字符集文件读取失败，请重新选择。'
+    };
+  }
+
+  if (!charsetFileState.count) {
+    return {
+      ready: false,
+      message: `字符集文件 ${file.name} 里没有识别到可用字符。`
+    };
+  }
+
+  return {
+    ready: true,
+    message: `字符集文件已就绪：${file.name}，共 ${charsetFileState.count} 个唯一字符。`
+  };
+}
+
+function getCurrentSourceInspectionTarget() {
+  if (selectedFile) {
+    return {
+      key: `manual:${selectedFile.name}:${selectedFile.size}:${selectedFile.lastModified}`,
+      sourceLabel: selectedFile.name,
+      kind: 'file',
+      file: selectedFile
+    };
+  }
+
+  if (selectedLibrarySource?.sourceHash) {
+    return {
+      key: `library:${selectedLibrarySource.sourceHash}`,
+      sourceLabel: selectedLibrarySource.sourceName || '已保存原始字体',
+      kind: 'saved',
+      sourceFontHash: selectedLibrarySource.sourceHash
+    };
+  }
+
+  if (getSelectedOperationMode() === 'incremental' && matchedSourceState?.sourceHash) {
+    return {
+      key: `matched:${matchedSourceState.sourceHash}`,
+      sourceLabel: matchedSourceState.sourceName || '自动匹配原始字体',
+      kind: 'saved',
+      sourceFontHash: matchedSourceState.sourceHash
+    };
+  }
+
+  return null;
+}
+
+function resetSourceInspectionState() {
+  sourceInspectionState = {
+    key: '',
+    status: 'idle',
+    sourceLabel: '',
+    payload: null,
+    error: ''
+  };
+}
+
+async function inspectSourceFontForPreflight(force = false) {
+  const target = getCurrentSourceInspectionTarget();
+
+  if (!target) {
+    if (sourceInspectionState.key || sourceInspectionState.status !== 'idle') {
+      sourceInspectionRequestId += 1;
+      resetSourceInspectionState();
+      updateConvertButtonState();
+    }
+    return null;
+  }
+
+  if (!force && sourceInspectionState.key === target.key) {
+    if (sourceInspectionState.status === 'ready') {
+      return sourceInspectionState.payload;
+    }
+
+    if (sourceInspectionState.status === 'loading') {
+      return null;
+    }
+  }
+
+  const requestId = sourceInspectionRequestId + 1;
+  sourceInspectionRequestId = requestId;
+  sourceInspectionState = {
+    key: target.key,
+    status: 'loading',
+    sourceLabel: target.sourceLabel,
+    payload: null,
+    error: ''
+  };
+  updateConvertButtonState();
+
+  try {
+    const requestPayload =
+      target.kind === 'file'
+        ? {
+            filename: target.file.name,
+            data: await readFileAsBase64(target.file),
+            includeData: false
+          }
+        : {
+            sourceFontHash: target.sourceFontHash,
+            includeData: false
+          };
+
+    const response = await fetch('/api/font-preview', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(requestPayload)
+    });
+
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || '原始字体特性读取失败。');
+    }
+
+    const payload = await response.json();
+
+    if (requestId !== sourceInspectionRequestId) {
+      return null;
+    }
+
+    sourceInspectionState = {
+      key: target.key,
+      status: 'ready',
+      sourceLabel: target.sourceLabel,
+      payload,
+      error: ''
+    };
+    updateConvertButtonState();
+    return payload;
+  } catch (error) {
+    if (requestId !== sourceInspectionRequestId) {
+      return null;
+    }
+
+    sourceInspectionState = {
+      key: target.key,
+      status: 'error',
+      sourceLabel: target.sourceLabel,
+      payload: null,
+      error: error instanceof Error ? error.message : '原始字体特性读取失败。'
+    };
+    updateConvertButtonState();
+    return null;
+  }
+}
+
+function formatFeatureTables(tables, fallback = '无') {
+  return Array.isArray(tables) && tables.length ? tables.join(' / ') : fallback;
+}
+
+function renderPreflightCollection(container, items, itemClassName, tagName = 'li') {
+  container.replaceChildren();
+
+  for (const item of items) {
+    const element = document.createElement(tagName);
+    element.className = `${itemClassName} is-${item.tone}`;
+    element.textContent = item.message;
+    container.append(element);
+  }
+}
+
+function getPreflightState() {
+  const operationMode = getSelectedOperationMode();
+  const outputLabel = getSelectedOutputLabel();
+  const items = [];
+  const featureItems = [];
+  const remoteUrl = getExistingSubsetUrlValue();
+  const existingSubsetLocalFile = existingSubsetFile.files?.[0] || null;
+  const subsetState = getSubsetModeValidationState();
+  const hasResolvedSource = hasSourceFontForCurrentOperation();
+
+  if (selectedFile) {
+    items.push({
+      tone: 'ready',
+      message: `原始全量字体已选中：${selectedFile.name}。`
+    });
+  } else if (selectedLibrarySource?.sourceHash) {
+    items.push({
+      tone: 'ready',
+      message: `原始全量字体将复用已保存项：${selectedLibrarySource.sourceName}。`
+    });
+  } else if (operationMode === 'incremental' && matchedSourceState?.sourceHash) {
+    items.push({
+      tone: 'ready',
+      message: `原始全量字体已自动匹配：${matchedSourceState.sourceName}。`
+    });
+  } else if (operationMode === 'incremental' && getExistingSubsetMatchTarget()) {
+    items.push({
+      tone: 'blocking',
+      message: '正在等待原始全量字体自动匹配；如果长时间没有结果，再手动上传。'
+    });
+  } else {
+    items.push({
+      tone: 'blocking',
+      message:
+        operationMode === 'incremental'
+          ? '请先提供当前子集字体，让系统自动匹配原始全量字体。'
+          : '请先上传原始全量字体，或从已保存列表里选择一份。'
+    });
+  }
+
+  if (operationMode === 'incremental') {
+    if (!remoteUrl && !existingSubsetLocalFile) {
+      items.push({
+        tone: 'blocking',
+        message: '请先填写当前子集字体 URL，或上传本地子集字体。'
+      });
+    } else if (remoteUrl && !isValidRemoteFontUrl(remoteUrl)) {
+      items.push({
+        tone: 'blocking',
+        message: '当前子集字体 URL 需要是 http:// 或 https:// 地址。'
+      });
+    } else if (remoteUrl) {
+      items.push({
+        tone: 'ready',
+        message: '当前子集字体将优先使用网络 URL。'
+      });
+    } else if (existingSubsetLocalFile) {
+      items.push({
+        tone: 'ready',
+        message: `当前子集字体已选中本地文件：${existingSubsetLocalFile.name}。`
+      });
+    }
+  }
+
+  items.push({
+    tone: subsetState.ready ? 'ready' : 'blocking',
+    message: subsetState.message
+  });
+
+  if (operationMode === 'incremental' && remoteUrl && existingSubsetLocalFile) {
+    featureItems.push({
+      tone: 'warning',
+      message: `你已经填写了当前子集字体 URL，本地文件 ${existingSubsetLocalFile.name} 这次会被忽略。`
+    });
+  }
+
+  if (sourceInspectionState.status === 'loading' && hasResolvedSource) {
+    featureItems.push({
+      tone: 'info',
+      message: `正在读取原始字体 ${sourceInspectionState.sourceLabel} 的 hinting / kerning 特性...`
+    });
+  } else if (sourceInspectionState.status === 'error' && hasResolvedSource) {
+    featureItems.push({
+      tone: 'warning',
+      message: `原始字体特性读取失败：${sourceInspectionState.error}`
+    });
+  } else if (sourceInspectionState.status === 'ready' && sourceInspectionState.payload) {
+    const payload = sourceInspectionState.payload;
+    featureItems.push({
+      tone: 'info',
+      message:
+        `已读取原始字体 ${sourceInspectionState.sourceLabel}：${payload.glyphCount || 0} 个字形，` +
+        `hinting 表 ${formatFeatureTables(payload.hintingTables)}，` +
+        `kerning 表 ${formatFeatureTables(payload.kerningTables)}。`
+    });
+
+    if (keepHinting.checked) {
+      featureItems.push(
+        payload.hasHintingData
+          ? {
+              tone: 'ready',
+              message: `当前会尽量保留 hinting，源字体里可用表为 ${formatFeatureTables(payload.hintingTables)}。`
+            }
+          : {
+              tone: 'warning',
+              message: '当前勾选了“保留 hinting”，但这份源字体本身不含 hinting 数据。'
+            }
+      );
+    } else if (payload.hasHintingData) {
+      featureItems.push({
+        tone: 'info',
+        message: '当前不会保留 hinting 数据，输出体积通常会更小。'
+      });
+    }
+
+    if (keepKerning.checked) {
+      featureItems.push(
+        payload.hasKerningData
+          ? {
+              tone: 'ready',
+              message: `当前会尽量保留 kerning，源字体里可用表为 ${formatFeatureTables(payload.kerningTables)}。`
+            }
+          : {
+              tone: 'warning',
+              message: '当前勾选了“保留 kerning”，但这份源字体本身不含 kerning 数据。'
+            }
+      );
+    } else if (payload.hasKerningData) {
+      featureItems.push({
+        tone: 'info',
+        message: '当前不会保留 kerning，输出体积通常会更小。'
+      });
+    }
+  }
+
+  const blockingItems = items.filter((item) => item.tone === 'blocking');
+  const warningItems = [...items, ...featureItems].filter((item) => item.tone === 'warning');
+  const firstBlockingMessage = blockingItems[0]?.message || '';
+  const summary = blockingItems.length
+    ? blockingItems.length === 1
+      ? `还差 1 项必需步骤：${firstBlockingMessage}`
+      : `还差 ${blockingItems.length} 项必需步骤，补齐后才会解锁转换按钮。`
+    : sourceInspectionState.status === 'loading'
+      ? '主要步骤已经齐了，正在补充读取原始字体特性。'
+      : warningItems.length
+        ? '已经可以开始转换了，但下面还有几条提醒，建议先看一眼。'
+        : `主要步骤已经齐了，可以开始转换并下载 ${outputLabel}。`;
+
+  return {
+    items,
+    featureItems,
+    blockingItems,
+    badgeText: blockingItems.length
+      ? `待补齐 ${blockingItems.length} 项`
+      : sourceInspectionState.status === 'loading'
+        ? '检查中'
+        : warningItems.length
+          ? '有提醒'
+          : '可开始',
+    badgeTone: blockingItems.length ? 'pending' : warningItems.length ? 'warning' : 'ready',
+    summary,
+    buttonTitle: blockingItems.length ? firstBlockingMessage : `开始转换并下载 ${outputLabel}`
+  };
+}
+
+function renderPreflightState(preflightState) {
+  preflightPanel.dataset.tone = preflightState.badgeTone;
+  preflightBadge.textContent = preflightState.badgeText;
+  preflightBadge.className = 'preflight-badge';
+
+  if (preflightState.badgeTone !== 'pending') {
+    preflightBadge.classList.add(`is-${preflightState.badgeTone}`);
+  }
+
+  preflightSummary.textContent = preflightState.summary;
+  renderPreflightCollection(preflightChecklist, preflightState.items, 'preflight-check', 'li');
+  renderPreflightCollection(preflightFeatureNotes, preflightState.featureItems, 'preflight-feature-note', 'div');
+  preflightFeatureNotes.classList.toggle('is-hidden', !preflightState.featureItems.length);
+}
+
+function updateConvertButtonState() {
+  const preflightState = getPreflightState();
+  convertButton.disabled = preflightState.blockingItems.length > 0;
+  convertButton.title = preflightState.buttonTitle;
+  renderPreflightState(preflightState);
 }
 
 function applySourceStatePresentation(state, badge, hint) {
@@ -526,6 +961,7 @@ function updateSourceFontMeta() {
 
   fileName.textContent = message;
   updateWorkflowCopy();
+  void inspectSourceFontForPreflight();
 }
 
 function updateWorkflowCopy() {
@@ -753,6 +1189,11 @@ function updateExistingSubsetMeta() {
   const remoteUrl = getExistingSubsetUrlValue();
 
   if (remoteUrl) {
+    if (!isValidRemoteFontUrl(remoteUrl)) {
+      existingSubsetMeta.textContent = '当前子集字体 URL 还不完整，请填写 http:// 或 https:// 地址。';
+      return;
+    }
+
     existingSubsetMeta.textContent = `将优先使用网络子集字体：${remoteUrl}`;
     return;
   }
@@ -1472,6 +1913,12 @@ function scheduleOriginalSourceMatch() {
   updateSourceFontMeta();
   updateConvertButtonState();
 
+  const remoteUrl = getExistingSubsetUrlValue();
+  if (remoteUrl && !isValidRemoteFontUrl(remoteUrl)) {
+    clearMatchedSource('当前子集字体 URL 还不完整，填成 http:// 或 https:// 后再自动匹配原始字体。');
+    return;
+  }
+
   const target = getExistingSubsetMatchTarget();
   if (!target) {
     clearMatchedSource('选择当前子集字体后，会自动匹配曾用于生成它的原始全量字体。');
@@ -1581,9 +2028,11 @@ async function loadCharsetPresets() {
 
     updatePresetDescription();
     updateSubsetSummary();
+    updateConvertButtonState();
   } catch (error) {
     presetSelect.innerHTML = '';
     presetDescription.textContent = error instanceof Error ? error.message : '系统预设加载失败。';
+    updateConvertButtonState();
   }
 }
 
@@ -2002,16 +2451,20 @@ outputPreviewCopy.addEventListener('click', () => {
 presetSelect.addEventListener('change', () => {
   updatePresetDescription();
   updateSubsetSummary();
+  updateConvertButtonState();
 });
 
 subsetText.addEventListener('input', () => {
   updateSubsetSummary();
+  updateConvertButtonState();
 });
 
 charsetFile.addEventListener('change', async () => {
   const file = charsetFile.files?.[0];
 
   if (!file) {
+    charsetFileLoadState = 'idle';
+    charsetFileLoadError = '';
     charsetFileState = {
       name: '',
       size: 0,
@@ -2021,15 +2474,25 @@ charsetFile.addEventListener('change', async () => {
     };
     charsetFileMeta.textContent = '还没有选择字符集文件。';
     updateSubsetSummary();
+    updateConvertButtonState();
     return;
   }
 
   try {
+    charsetFileLoadState = 'loading';
+    charsetFileLoadError = '';
+    charsetFileMeta.textContent = `正在读取 ${file.name}...`;
+    updateConvertButtonState();
     await cacheCharsetFile(file);
+    charsetFileLoadState = 'ready';
     updateSubsetSummary();
+    updateConvertButtonState();
   } catch (error) {
-    charsetFileMeta.textContent = error instanceof Error ? error.message : '字符集文件读取失败。';
+    charsetFileLoadState = 'error';
+    charsetFileLoadError = error instanceof Error ? error.message : '字符集文件读取失败。';
+    charsetFileMeta.textContent = charsetFileLoadError;
     updateStatus(charsetFileMeta.textContent, 'error');
+    updateConvertButtonState();
   }
 });
 
@@ -2048,6 +2511,7 @@ existingSubsetFile.addEventListener('change', async () => {
     clearSubsetPreview();
     updateSubsetSummary();
     updateCdnFilenameModePanel();
+    updateConvertButtonState();
     return;
   }
 
@@ -2062,12 +2526,14 @@ existingSubsetFile.addEventListener('change', async () => {
     scheduleSubsetPreview();
     updateSubsetSummary();
     updateCdnFilenameModePanel();
+    updateConvertButtonState();
   } catch (error) {
     existingSubsetMeta.textContent = error instanceof Error ? error.message : '当前子集字体读取失败。';
     updateStatus(existingSubsetMeta.textContent, 'error');
     clearMatchedSource('当前子集字体读取失败，请重新选择。');
     clearSubsetPreview();
     updateCdnFilenameModePanel();
+    updateConvertButtonState();
   }
 });
 
@@ -2082,6 +2548,13 @@ existingSubsetUrl.addEventListener('input', () => {
   scheduleSubsetPreview();
   updateSubsetSummary();
   updateCdnFilenameModePanel();
+  updateConvertButtonState();
+});
+
+[keepHinting, keepKerning].forEach((input) => {
+  input.addEventListener('change', () => {
+    updateConvertButtonState();
+  });
 });
 
 convertButton.addEventListener('click', () => {

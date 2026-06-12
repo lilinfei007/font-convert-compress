@@ -1565,9 +1565,11 @@ async function handleFontFingerprint(request, response) {
 async function handleFontPreview(request, response) {
   try {
     const rawBody = await readRequestBody(request);
-    const { filename = '', data = '', url = '' } = JSON.parse(rawBody);
+    const { filename = '', data = '', url = '', sourceFontHash = '', includeData = true } = JSON.parse(rawBody);
     const fontPayload =
-      typeof url === 'string' && url.trim()
+      typeof sourceFontHash === 'string' && sourceFontHash.trim()
+        ? await getSourceFontPayload(sourceFontHash.trim())
+        : typeof url === 'string' && url.trim()
         ? await fetchRemoteFontAsPayload(url.trim())
         : {
             filename,
@@ -1586,16 +1588,22 @@ async function handleFontPreview(request, response) {
       keepKerning: true
     });
     const codePoints = extractCmapCodePoints(fontObject);
+    const sourceFeatures = inspectFontFeatures(fontObject);
 
     sendJson(response, 200, {
       filename: fontPayload.filename,
       type,
       bytes: sourceBuffer.length,
-      glyphCount: Array.isArray(fontObject.glyf) ? fontObject.glyf.length : 0,
+      sourceHash: hashBuffer(sourceBuffer),
+      glyphCount: sourceFeatures.glyphCount,
       count: codePoints.length,
       codePoints,
       characters: codePointsToText(codePoints),
-      base64Data: fontPayload.base64Data
+      hasHintingData: sourceFeatures.hasHintingData,
+      hasKerningData: sourceFeatures.hasKerningData,
+      hintingTables: sourceFeatures.hintingTables,
+      kerningTables: sourceFeatures.kerningTables,
+      base64Data: includeData === false ? '' : fontPayload.base64Data
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : '字体预览解析失败。';

@@ -302,6 +302,19 @@
           <div id="cdnUploadResult" class="delivery-result is-hidden" aria-live="polite"></div>
         </section>
 
+        <section id="preflightPanel" class="preflight-panel" aria-live="polite">
+          <div class="preflight-head">
+            <div>
+              <p class="preflight-eyebrow">Before Convert</p>
+              <h2 class="preflight-title">转换前检查</h2>
+            </div>
+            <span id="preflightBadge" class="preflight-badge">待补齐</span>
+          </div>
+          <p id="preflightSummary" class="preflight-summary">先补齐必需项，按钮才会解锁。</p>
+          <ul id="preflightChecklist" class="preflight-checklist"></ul>
+          <div id="preflightFeatureNotes" class="preflight-feature-notes is-hidden"></div>
+        </section>
+
         <div class="actions">
           <button id="convertButton" class="primary-button" disabled>转换并下载 TTF</button>
           <p id="status" class="status">请选择一个字体文件开始。</p>
