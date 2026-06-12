@@ -45,10 +45,12 @@ const subsetPreviewPanel = document.querySelector('#subsetPreviewPanel');
 const subsetPreviewMeta = document.querySelector('#subsetPreviewMeta');
 const subsetPreviewText = document.querySelector('#subsetPreviewText');
 const subsetPreviewMore = document.querySelector('#subsetPreviewMore');
+const subsetPreviewCopy = document.querySelector('#subsetPreviewCopy');
 const outputPreviewPanel = document.querySelector('#outputPreviewPanel');
 const outputPreviewMeta = document.querySelector('#outputPreviewMeta');
 const outputPreviewText = document.querySelector('#outputPreviewText');
 const outputPreviewMore = document.querySelector('#outputPreviewMore');
+const outputPreviewCopy = document.querySelector('#outputPreviewCopy');
 const uploadToCdn = document.querySelector('#uploadToCdn');
 const cdnUploadCard = document.querySelector('#cdnUploadCard');
 const cdnUploadHelp = document.querySelector('#cdnUploadHelp');
@@ -116,20 +118,32 @@ let runtimeConfigState = {
 };
 const previewStates = {
   subset: {
-    characters: [],
-    count: 0,
+    items: [],
+    parsedCount: 0,
+    displayCount: 0,
     renderedCount: 0,
     filename: '',
     context: '当前子集',
-    family: ''
+    family: '',
+    prefersRequestedOrder: false,
+    missingItems: [],
+    copyText: '',
+    copyCount: 0,
+    copyResetTimer: 0
   },
   output: {
-    characters: [],
-    count: 0,
+    items: [],
+    parsedCount: 0,
+    displayCount: 0,
     renderedCount: 0,
     filename: '',
     context: '压缩完成后',
-    family: ''
+    family: '',
+    prefersRequestedOrder: false,
+    missingItems: [],
+    copyText: '',
+    copyCount: 0,
+    copyResetTimer: 0
   }
 };
 
@@ -287,6 +301,72 @@ function formatSizeDelta(sourceBytes, outputBytes) {
   }
 
   return `${formatBytes(sourceBytes)} -> ${formatBytes(outputBytes)}，大小不变`;
+}
+
+function formatCodePoint(codePoint) {
+  return `U+${codePoint.toString(16).toUpperCase().padStart(codePoint > 0xffff ? 6 : 4, '0')}`;
+}
+
+function getPreviewCharacterMeta(character) {
+  const codePoint = character.codePointAt(0);
+
+  if (!Number.isInteger(codePoint)) {
+    return null;
+  }
+
+  if (codePoint === 32) {
+    return {
+      character,
+      codePoint,
+      displayCharacter: '␠',
+      infoLabel: `空格 · ${formatCodePoint(codePoint)}`,
+      title: `空格 ${formatCodePoint(codePoint)}`,
+      usePreviewFont: false
+    };
+  }
+
+  if (codePoint === 0x3000) {
+    return {
+      character,
+      codePoint,
+      displayCharacter: '□',
+      infoLabel: `全角空格 · ${formatCodePoint(codePoint)}`,
+      title: `全角空格 ${formatCodePoint(codePoint)}`,
+      usePreviewFont: false
+    };
+  }
+
+  return {
+    character,
+    codePoint,
+    displayCharacter: character,
+    infoLabel: formatCodePoint(codePoint),
+    title: `${character} ${formatCodePoint(codePoint)}`,
+    usePreviewFont: true
+  };
+}
+
+function buildPreviewItem(character, missing = false) {
+  const meta = getPreviewCharacterMeta(character);
+
+  if (!meta) {
+    return null;
+  }
+
+  return {
+    ...meta,
+    missing
+  };
+}
+
+function getPreviewCharactersFromPayload(payload) {
+  if (Array.isArray(payload?.codePoints) && payload.codePoints.length) {
+    return payload.codePoints
+      .filter((codePoint) => Number.isInteger(codePoint))
+      .map((codePoint) => String.fromCodePoint(codePoint));
+  }
+
+  return Array.from(typeof payload?.characters === 'string' ? payload.characters : '');
 }
 
 async function getSha256Hex(blob) {
@@ -858,14 +938,44 @@ function getPreviewElements(kind) {
         panel: outputPreviewPanel,
         meta: outputPreviewMeta,
         text: outputPreviewText,
-        more: outputPreviewMore
+        more: outputPreviewMore,
+        copy: outputPreviewCopy
       }
     : {
         panel: subsetPreviewPanel,
         meta: subsetPreviewMeta,
         text: subsetPreviewText,
-        more: subsetPreviewMore
+        more: subsetPreviewMore,
+        copy: subsetPreviewCopy
       };
+}
+
+function getPreviewCopyLabel(kind, copiedCount = 0) {
+  if (copiedCount > 0) {
+    return `已复制 ${copiedCount} 个字符`;
+  }
+
+  return '复制已识别字符';
+}
+
+function resetPreviewCopyButton(kind) {
+  const elements = getPreviewElements(kind);
+  const state = previewStates[kind];
+
+  if (state.copyResetTimer) {
+    window.clearTimeout(state.copyResetTimer);
+    state.copyResetTimer = 0;
+  }
+
+  elements.copy.textContent = getPreviewCopyLabel(kind);
+}
+
+function updatePreviewActionButtons(kind) {
+  const elements = getPreviewElements(kind);
+  const state = previewStates[kind];
+
+  elements.more.classList.toggle('is-hidden', !state.items.length || state.renderedCount >= state.items.length);
+  elements.copy.classList.toggle('is-hidden', !state.copyText);
 }
 
 function getPreviewStyleElement(kind) {
@@ -891,32 +1001,68 @@ function getPreviewStyleElement(kind) {
 function updatePreviewMeta(kind) {
   const elements = getPreviewElements(kind);
   const state = previewStates[kind];
+  const missingText =
+    state.missingItems.length > 0
+      ? ` 未识别：${state.missingItems.map((item) => item.title).join('、')}。`
+      : '';
 
-  if (!state.count) {
+  if (!state.parsedCount && !state.displayCount) {
     elements.meta.textContent = `${state.filename || '字体'} 没有解析到可预览字符。`;
     return;
   }
 
-  elements.meta.textContent = `${state.filename} ${state.context}包含 ${state.count} 个可预览字符，已显示 ${state.renderedCount} 个。`;
+  if (state.prefersRequestedOrder) {
+    elements.meta.textContent =
+      `${state.filename} ${state.context}识别到 ${state.parsedCount} 个可预览字符，` +
+      `按当前输入顺序显示 ${state.displayCount} 个目标字符，已显示 ${state.renderedCount} 个。` +
+      missingText;
+    return;
+  }
+
+  elements.meta.textContent =
+    `${state.filename} ${state.context}包含 ${state.parsedCount} 个可预览字符，已显示 ${state.renderedCount} 个。` +
+    ' 预览按字符集展开，不按原句顺序。';
 }
 
 function appendPreviewCharacters(kind) {
   const elements = getPreviewElements(kind);
   const state = previewStates[kind];
 
-  if (!state.characters.length) {
+  if (!state.items.length) {
     elements.text.textContent = '未识别到字符';
-    elements.more.classList.add('is-hidden');
+    updatePreviewActionButtons(kind);
     updatePreviewMeta(kind);
     return;
   }
 
-  const nextCount = Math.min(state.renderedCount + PREVIEW_BATCH_SIZE, state.characters.length);
-  const chunk = state.characters.slice(state.renderedCount, nextCount).join('');
+  const nextCount = Math.min(state.renderedCount + PREVIEW_BATCH_SIZE, state.items.length);
+  const chunk = state.items.slice(state.renderedCount, nextCount);
+  const fragment = document.createDocumentFragment();
 
-  elements.text.append(document.createTextNode(chunk));
+  for (const item of chunk) {
+    const token = document.createElement('span');
+    token.className = `preview-token${item.missing ? ' is-missing' : ''}`;
+    token.title = item.missing ? `${item.title}（输出字体里未识别到）` : item.title;
+
+    const glyph = document.createElement('span');
+    glyph.className = 'preview-token-char';
+    glyph.textContent = item.displayCharacter;
+
+    if (item.usePreviewFont && state.family) {
+      glyph.style.fontFamily = `"${state.family}", "Segoe UI Symbol", sans-serif`;
+    }
+
+    const code = document.createElement('span');
+    code.className = 'preview-token-code';
+    code.textContent = item.infoLabel;
+
+    token.append(glyph, code);
+    fragment.append(token);
+  }
+
+  elements.text.append(fragment);
   state.renderedCount = nextCount;
-  elements.more.classList.toggle('is-hidden', state.renderedCount >= state.characters.length);
+  updatePreviewActionButtons(kind);
   updatePreviewMeta(kind);
 }
 
@@ -924,16 +1070,21 @@ function clearPreview(kind) {
   const elements = getPreviewElements(kind);
   const state = previewStates[kind];
 
-  state.characters = [];
-  state.count = 0;
+  state.items = [];
+  state.parsedCount = 0;
+  state.displayCount = 0;
   state.renderedCount = 0;
   state.filename = '';
   state.family = '';
+  state.prefersRequestedOrder = false;
+  state.missingItems = [];
+  state.copyText = '';
+  state.copyCount = 0;
   elements.panel.classList.add('is-hidden');
   elements.meta.textContent = '';
-  elements.text.textContent = '';
-  elements.text.style.fontFamily = '';
-  elements.more.classList.add('is-hidden');
+  elements.text.replaceChildren();
+  resetPreviewCopyButton(kind);
+  updatePreviewActionButtons(kind);
 
   const styleElement = kind === 'output' ? outputPreviewStyle : subsetPreviewStyle;
   if (styleElement) {
@@ -954,12 +1105,64 @@ function clearOutputPreview() {
 
 function setPreviewMessage(kind, message) {
   const elements = getPreviewElements(kind);
+  const state = previewStates[kind];
 
   elements.panel.classList.remove('is-hidden');
   elements.meta.textContent = message;
-  elements.text.textContent = '';
-  elements.text.style.fontFamily = '';
-  elements.more.classList.add('is-hidden');
+  elements.text.replaceChildren();
+  state.items = [];
+  state.parsedCount = 0;
+  state.displayCount = 0;
+  state.renderedCount = 0;
+  state.family = '';
+  state.prefersRequestedOrder = false;
+  state.missingItems = [];
+  state.copyText = '';
+  state.copyCount = 0;
+  resetPreviewCopyButton(kind);
+  updatePreviewActionButtons(kind);
+}
+
+async function writeTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', 'readonly');
+  textarea.style.position = 'fixed';
+  textarea.style.top = '-9999px';
+  document.body.append(textarea);
+  textarea.select();
+
+  const copied = document.execCommand('copy');
+  textarea.remove();
+
+  if (!copied) {
+    throw new Error('浏览器当前不支持自动复制。');
+  }
+}
+
+async function copyPreviewCharacters(kind) {
+  const elements = getPreviewElements(kind);
+  const state = previewStates[kind];
+
+  if (!state.copyText) {
+    return;
+  }
+
+  try {
+    await writeTextToClipboard(state.copyText);
+    resetPreviewCopyButton(kind);
+    elements.copy.textContent = getPreviewCopyLabel(kind, state.copyCount);
+    state.copyResetTimer = window.setTimeout(() => {
+      resetPreviewCopyButton(kind);
+    }, 1800);
+  } catch (error) {
+    updateStatus(error instanceof Error ? error.message : '复制失败，请稍后重试。', 'error');
+  }
 }
 
 function setSubsetPreviewMessage(message) {
@@ -970,14 +1173,28 @@ function setOutputPreviewMessage(message) {
   setPreviewMessage('output', message);
 }
 
-function renderFontPreview(kind, payload, targetKey, context) {
+function renderFontPreview(kind, payload, targetKey, context, options = {}) {
   const type = typeof payload.type === 'string' ? payload.type.toLowerCase() : 'ttf';
   const mimeType = FONT_MIME_TYPES[type] || 'font/ttf';
   const formatHint = FONT_FORMAT_HINTS[type] || 'truetype';
   const family = `${kind === 'output' ? 'OutputPreviewFont' : 'SubsetPreviewFont'}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const characters = typeof payload.characters === 'string' ? payload.characters : '';
-  const characterList = Array.from(characters);
-  const count = Number(payload.count || characterList.length || 0);
+  const parsedCharacterList = getPreviewCharactersFromPayload(payload);
+  const parsedCodePointSet = new Set(
+    parsedCharacterList
+      .map((character) => character.codePointAt(0))
+      .filter((codePoint) => Number.isInteger(codePoint))
+  );
+  const preferredCharacters = Array.isArray(options.preferredCharacters)
+    ? options.preferredCharacters.filter((character) => typeof character === 'string' && character)
+    : [];
+  const preferredItems = preferredCharacters
+    .map((character) => buildPreviewItem(character, !parsedCodePointSet.has(character.codePointAt(0))))
+    .filter(Boolean);
+  const parsedItems = parsedCharacterList.map((character) => buildPreviewItem(character)).filter(Boolean);
+  const items = preferredItems.length ? preferredItems : parsedItems;
+  const recognizedCharacters = preferredItems.length
+    ? preferredCharacters.filter((character) => parsedCodePointSet.has(character.codePointAt(0)))
+    : parsedCharacterList;
   const filename =
     typeof payload.filename === 'string' && payload.filename
       ? payload.filename
@@ -996,20 +1213,25 @@ function renderFontPreview(kind, payload, targetKey, context) {
   font-display: block;
 }`;
 
-  state.characters = characterList;
-  state.count = count;
+  state.items = items;
+  state.parsedCount = Number(payload.count || parsedItems.length || 0);
+  state.displayCount = items.length;
   state.renderedCount = 0;
   state.filename = filename;
   state.context = context;
   state.family = family;
+  state.prefersRequestedOrder = preferredItems.length > 0;
+  state.missingItems = preferredItems.filter((item) => item.missing);
+  state.copyText = recognizedCharacters.join('');
+  state.copyCount = recognizedCharacters.length;
+  resetPreviewCopyButton(kind);
 
   if (kind === 'subset') {
     subsetPreviewTargetKey = targetKey;
   }
 
   elements.panel.classList.remove('is-hidden');
-  elements.text.textContent = '';
-  elements.text.style.fontFamily = `"${family}", "Segoe UI Symbol", sans-serif`;
+  elements.text.replaceChildren();
   appendPreviewCharacters(kind);
 }
 
@@ -1017,8 +1239,10 @@ function renderSubsetPreview(payload, targetKey) {
   renderFontPreview('subset', payload, targetKey, '当前');
 }
 
-function renderOutputPreview(payload) {
-  renderFontPreview('output', payload, '', '压缩完成后');
+function renderOutputPreview(payload, previewCharacters = []) {
+  renderFontPreview('output', payload, '', '压缩完成后', {
+    preferredCharacters: previewCharacters
+  });
 }
 
 async function inspectExistingSubsetForPreview() {
@@ -1309,7 +1533,7 @@ async function getSourceFontPayload(operationMode) {
   throw new Error('请先选择原始全量字体。');
 }
 
-async function previewOutputFont(blob, outputName) {
+async function previewOutputFont(blob, outputName, previewCharacters = []) {
   setOutputPreviewMessage('正在生成压缩完成字体预览...');
 
   try {
@@ -1331,7 +1555,7 @@ async function previewOutputFont(blob, outputName) {
     }
 
     const payload = await response.json();
-    renderOutputPreview(payload);
+    renderOutputPreview(payload, previewCharacters);
     return true;
   } catch (error) {
     setOutputPreviewMessage(error instanceof Error ? error.message : '压缩完成字体预览解析失败。');
@@ -1370,7 +1594,8 @@ async function getSubsetPayload() {
     return {
       subsetMode,
       uniqueCount: 0,
-      label: '完整字体'
+      label: '完整字体',
+      previewCharacters: []
     };
   }
 
@@ -1384,7 +1609,8 @@ async function getSubsetPayload() {
       subsetMode,
       presetId: preset.id,
       uniqueCount: preset.count,
-      label: preset.name
+      label: preset.name,
+      previewCharacters: []
     };
   }
 
@@ -1398,7 +1624,8 @@ async function getSubsetPayload() {
       subsetMode,
       subsetText: subsetText.value,
       uniqueCount: characters.length,
-      label: '手动输入字符'
+      label: '手动输入字符',
+      previewCharacters: characters
     };
   }
 
@@ -1424,7 +1651,8 @@ async function getSubsetPayload() {
     subsetMode,
     charsetFileText: charsetFileState.text,
     uniqueCount: charsetFileState.count,
-    label: `字符集文件：${file.name}`
+    label: `字符集文件：${file.name}`,
+    previewCharacters: getSubsetCharacters(charsetFileState.text)
   };
 }
 
@@ -1551,9 +1779,17 @@ async function convertSelectedFile() {
     );
     const sourceHasHinting = response.headers.get('X-Source-Has-Hinting') === 'true';
     const sourceHasKerning = response.headers.get('X-Source-Has-Kerning') === 'true';
+    const outputHasKerning = response.headers.get('X-Output-Has-Kerning') === 'true';
+    const removedKerningTables = (response.headers.get('X-Removed-Kerning-Tables') || '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const subsetGlyphHintingStripped = Number(response.headers.get('X-Subset-Glyph-Hinting-Stripped') || 0);
     const responseOutputType = response.headers.get('X-Output-Type') || outputType;
     const serverSourceSaved = response.headers.get('X-Server-Source-Saved') === 'true';
+    const serverSourceAction = response.headers.get('X-Server-Source-Action') || (serverSourceSaved ? 'created' : 'reused');
     const serverMatchSaved = response.headers.get('X-Server-Match-Saved') === 'true';
+    const serverMatchAction = response.headers.get('X-Server-Match-Action') || (serverMatchSaved ? 'created' : 'updated');
     const cdnUploadRequested = response.headers.get('X-Cdn-Upload-Requested') === 'true';
     const cdnUploadSucceeded = response.headers.get('X-Cdn-Upload-Succeeded') === 'true';
     const cdnUploadLabel = decodeURIComponent(
@@ -1566,7 +1802,7 @@ async function convertSelectedFile() {
     const outputName = decodeURIComponent(
       contentDisposition.match(/filename="(.+?)"/)?.[1] || fallbackName
     );
-    if (serverSourceSaved) {
+    if (serverSourceAction === 'created' || serverSourceAction === 'updated') {
       await loadSourceLibrary();
     }
 
@@ -1578,7 +1814,13 @@ async function convertSelectedFile() {
     link.click();
     link.remove();
     URL.revokeObjectURL(downloadUrl);
-    const renderedOutputPreview = await previewOutputFont(blob, outputName);
+    const outputPreviewCharacters =
+      operationMode === 'incremental' || subsetPayload.subsetMode === 'full'
+        ? []
+        : Array.isArray(subsetPayload.previewCharacters)
+          ? subsetPayload.previewCharacters
+          : [];
+    const renderedOutputPreview = await previewOutputFont(blob, outputName, outputPreviewCharacters);
 
     const notes = [];
     if (operationModeHeader === 'incremental') {
@@ -1596,15 +1838,21 @@ async function convertSelectedFile() {
     }
     if (keepHinting.checked && !sourceHasHinting) {
       notes.push('源字体不含 hinting 数据，勾选无影响');
+    } else if (keepHinting.checked && subsetGlyphHintingStripped > 0) {
+      notes.push(`为避免子集字形异常，已移除 ${subsetGlyphHintingStripped} 个字形的局部 hinting 指令`);
     }
     if (keepKerning.checked && !sourceHasKerning) {
       notes.push('源字体不含 kerning 数据，勾选无影响');
+    } else if (!keepKerning.checked && removedKerningTables.length > 0 && !outputHasKerning) {
+      notes.push('已按当前设置移除 kerning 表，避免 hinting 连带保留字距信息');
     }
-    if (serverMatchSaved) {
+    if (serverMatchAction === 'created') {
       notes.push('服务端已建立当前输出与原始字体的自动匹配');
     }
-    if (serverSourceSaved) {
+    if (serverSourceAction === 'created') {
       notes.push('原始字体已保存到服务端列表');
+    } else if (serverSourceAction === 'updated') {
+      notes.push('检测到同源字体，已刷新服务端原始字体记录');
     }
     if (cdnUploadRequested && cdnUploadSucceeded) {
       notes.push(`已自动上传到 ${cdnUploadLabel}`);
@@ -1739,8 +1987,16 @@ subsetPreviewMore.addEventListener('click', () => {
   appendPreviewCharacters('subset');
 });
 
+subsetPreviewCopy.addEventListener('click', () => {
+  void copyPreviewCharacters('subset');
+});
+
 outputPreviewMore.addEventListener('click', () => {
   appendPreviewCharacters('output');
+});
+
+outputPreviewCopy.addEventListener('click', () => {
+  void copyPreviewCharacters('output');
 });
 
 presetSelect.addEventListener('change', () => {

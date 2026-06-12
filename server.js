@@ -308,6 +308,56 @@ function codePointsToText(codePoints) {
   return codePoints.map((codePoint) => String.fromCodePoint(codePoint)).join('');
 }
 
+function stripSubsetGlyphHinting(fontObject) {
+  if (!Array.isArray(fontObject?.glyf)) {
+    return 0;
+  }
+
+  let strippedCount = 0;
+
+  for (const glyph of fontObject.glyf) {
+    if (Array.isArray(glyph?.instructions) && glyph.instructions.length > 0) {
+      delete glyph.instructions;
+      strippedCount += 1;
+    }
+  }
+
+  return strippedCount;
+}
+
+function stripKerningTables(fontObject) {
+  const removedTables = [];
+
+  for (const tableName of ['GPOS', 'kern', 'kerx']) {
+    if (Object.prototype.hasOwnProperty.call(fontObject || {}, tableName)) {
+      delete fontObject[tableName];
+      removedTables.push(tableName);
+    }
+  }
+
+  return removedTables;
+}
+
+function subsetIncludesEmptyAdvanceGlyph(fontObject, subsetCodePoints) {
+  if (!Array.isArray(fontObject?.glyf) || !subsetCodePoints?.length) {
+    return false;
+  }
+
+  const cmap = fontObject.cmap || {};
+
+  return subsetCodePoints.some((codePoint) => {
+    const glyphIndex = cmap[codePoint];
+    const glyph = fontObject.glyf[glyphIndex];
+
+    return (
+      glyph &&
+      (!Array.isArray(glyph.contours) || glyph.contours.length === 0) &&
+      Number.isFinite(glyph.advanceWidth) &&
+      glyph.advanceWidth > 0
+    );
+  });
+}
+
 function getOtfMetricIndexes(rawFont) {
   if (rawFont?.readOptions?.subset?.length) {
     return Object.keys(rawFont.subsetMap || { 0: true })
@@ -432,7 +482,10 @@ async function saveSourceFontBuffer(filename, buffer) {
   ];
   await writeFontLibrary(library);
 
-  return record;
+  return {
+    action: existingRecord ? 'updated' : 'created',
+    record
+  };
 }
 
 async function saveSourceFontPayload({ filename, base64Data }) {
@@ -517,7 +570,10 @@ async function saveSubsetSourceMatch({ subsetHash, sourceHash, outputName, outpu
   ];
   await writeFontLibrary(library);
 
-  return record;
+  return {
+    action: existingRecord ? 'updated' : 'created',
+    record
+  };
 }
 
 async function getSubsetSourceMatch(subsetHash) {
@@ -1193,6 +1249,8 @@ async function createFontFromPayload({
     compound2simple: true
   });
   const fontObject = font.get();
+  const subsetGlyphHintingStripped =
+    keepHinting && subsetCodePoints?.length ? stripSubsetGlyphHinting(fontObject) : 0;
 
   if (type === 'otf') {
     repairOtfGlyphMetrics(fontObject, sourceBuffer, subsetCodePoints);
@@ -1202,7 +1260,8 @@ async function createFontFromPayload({
     type,
     sourceBuffer,
     font,
-    fontObject
+    fontObject,
+    subsetGlyphHintingStripped
   };
 }
 
@@ -1271,7 +1330,7 @@ async function convertFont({
     finalSubsetCodePoints = mergeCodePoints(existingCodePoints, requestedCodePoints);
   }
 
-  const { sourceBuffer, font, fontObject } = await createFontFromPayload({
+  const { sourceBuffer, font, fontObject, subsetGlyphHintingStripped } = await createFontFromPayload({
     filename,
     base64Data,
     subsetCodePoints: finalSubsetCodePoints,
@@ -1279,8 +1338,13 @@ async function convertFont({
     keepKerning
   });
   const sourceFeatures = inspectFontFeatures(fontObject);
+  const removedKerningTables = !keepKerning ? stripKerningTables(fontObject) : [];
+  const outputFeatures = inspectFontFeatures(fontObject);
 
-  if (optimize) {
+  const shouldOptimize =
+    optimize && !subsetIncludesEmptyAdvanceGlyph(fontObject, finalSubsetCodePoints);
+
+  if (shouldOptimize) {
     font.optimize();
   }
 
@@ -1313,6 +1377,8 @@ async function convertFont({
     outputHash: hashBuffer(outputBuffer),
     sourceBytes: sourceBuffer.length,
     outputBytes: outputBuffer.length,
+    subsetGlyphHintingStripped,
+    removedKerningTables,
     subsetCount: finalSubsetCodePoints.length,
     newSubsetCount: requestedCodePoints.length,
     existingSubsetCount,
@@ -1321,7 +1387,8 @@ async function convertFont({
     operationMode,
     keepHinting,
     keepKerning,
-    sourceFeatures
+    sourceFeatures,
+    outputFeatures
   };
 }
 
@@ -1349,7 +1416,7 @@ async function handleConvert(request, response) {
     } = JSON.parse(rawBody);
 
     let sourcePayload;
-    let savedSourceRecord = null;
+    let sourceRecordState = null;
 
     if (typeof sourceFontHash === 'string' && sourceFontHash.trim()) {
       const savedPayload = await getSourceFontPayload(sourceFontHash.trim());
@@ -1357,7 +1424,13 @@ async function handleConvert(request, response) {
         filename: savedPayload.filename,
         base64Data: savedPayload.base64Data
       };
-      savedSourceRecord = await touchSourceFont(savedPayload.record.sourceHash);
+      const reusedRecord = await touchSourceFont(savedPayload.record.sourceHash);
+      sourceRecordState = reusedRecord
+        ? {
+            action: 'reused',
+            record: reusedRecord
+          }
+        : null;
     } else if (typeof filename === 'string' && typeof data === 'string' && filename && data) {
       sourcePayload = {
         filename,
@@ -1389,15 +1462,15 @@ async function handleConvert(request, response) {
       keepKerning: Boolean(keepKerning),
       optimize: optimize !== false
     });
-    savedSourceRecord =
-      savedSourceRecord ||
+    sourceRecordState =
+      sourceRecordState ||
       (await saveSourceFontPayload({
         filename: sourcePayload.filename,
         base64Data: sourcePayload.base64Data
       }));
-    await saveSubsetSourceMatch({
+    const subsetMatchState = await saveSubsetSourceMatch({
       subsetHash: result.outputHash,
-      sourceHash: savedSourceRecord.sourceHash,
+      sourceHash: sourceRecordState.record.sourceHash,
       outputName: result.outputName,
       outputBytes: result.outputBytes
     });
@@ -1423,10 +1496,14 @@ async function handleConvert(request, response) {
       'X-Source-Bytes': String(result.sourceBytes),
       'X-Output-Bytes': String(result.outputBytes),
       'X-Output-Type': result.outputType,
-      'X-Source-Hash': savedSourceRecord.sourceHash,
+      'X-Source-Hash': sourceRecordState.record.sourceHash,
       'X-Output-Hash': result.outputHash,
-      'X-Server-Source-Saved': 'true',
-      'X-Server-Match-Saved': 'true',
+      'X-Server-Source-Saved': String(
+        sourceRecordState.action === 'created' || sourceRecordState.action === 'updated'
+      ),
+      'X-Server-Source-Action': sourceRecordState.action,
+      'X-Server-Match-Saved': String(subsetMatchState?.action === 'created'),
+      'X-Server-Match-Action': subsetMatchState?.action || 'updated',
       'X-Subset-Count': String(result.subsetCount),
       'X-New-Subset-Count': String(result.newSubsetCount),
       'X-Existing-Subset-Count': String(result.existingSubsetCount),
@@ -1437,6 +1514,10 @@ async function handleConvert(request, response) {
       'X-Keep-Kerning': String(result.keepKerning),
       'X-Source-Has-Hinting': String(result.sourceFeatures.hasHintingData),
       'X-Source-Has-Kerning': String(result.sourceFeatures.hasKerningData),
+      'X-Output-Has-Hinting': String(result.outputFeatures.hasHintingData),
+      'X-Output-Has-Kerning': String(result.outputFeatures.hasKerningData),
+      'X-Removed-Kerning-Tables': result.removedKerningTables.join(','),
+      'X-Subset-Glyph-Hinting-Stripped': String(result.subsetGlyphHintingStripped || 0),
       'X-Source-Glyph-Count': String(result.sourceFeatures.glyphCount),
       'X-Source-Hinting-Tables': result.sourceFeatures.hintingTables.join(','),
       'X-Source-Kerning-Tables': result.sourceFeatures.kerningTables.join(','),
