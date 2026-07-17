@@ -136,6 +136,22 @@
             </div>
           </div>
 
+          <details id="repositoryStoragePanel" class="repository-storage">
+            <summary>
+              <span>GitHub / Gitee 字体仓库</span>
+              <small id="repositoryStorageSummary">正在读取服务端配置</small>
+            </summary>
+            <div class="repository-storage-body">
+              <p id="repositoryStorageMeta" class="subset-footnote">
+                仓库地址和 Token 由服务端环境变量提供，不会发送到浏览器。
+              </p>
+              <div class="repository-storage-actions">
+                <button id="connectRepositoryButton" class="secondary-button" type="button" disabled>使用远程仓库</button>
+                <button id="useLocalStorageButton" class="secondary-button" type="button" disabled>改用本地存储</button>
+              </div>
+            </div>
+          </details>
+
           <div class="source-library">
             <label class="field source-library-field" for="sourceFontSelect">
               <span id="sourceLibraryTitle" class="field-title">已保存原始字体</span>
@@ -144,6 +160,20 @@
             <div class="source-library-actions">
               <button id="useSavedSourceButton" class="secondary-button" type="button" disabled>使用</button>
               <button id="deleteSavedSourceButton" class="secondary-button" type="button" disabled>移除</button>
+            </div>
+            <div class="source-alias-editor">
+              <label class="field source-alias-field" for="sourceFontAlias">
+                <span class="field-title">字体别名</span>
+                <input
+                  id="sourceFontAlias"
+                  class="text-input"
+                  type="text"
+                  maxlength="80"
+                  placeholder="例如：官网正文字体"
+                  disabled
+                />
+              </label>
+              <button id="saveSourceAliasButton" class="secondary-button" type="button" disabled>保存别名</button>
             </div>
             <p id="sourceLibraryMeta" class="subset-footnote">正在读取服务端原始字体列表...</p>
           </div>
@@ -257,6 +287,50 @@
         </section>
 
         <section class="delivery-panel" aria-label="交付设置">
+          <details id="cdnConfigPanel" class="cdn-config-panel">
+            <summary>
+              <span>CDN 上传配置</span>
+              <small id="cdnConfigSummary">正在读取服务端默认配置</small>
+            </summary>
+            <div class="cdn-config-body">
+              <div class="cdn-config-grid">
+                <label class="field" for="cdnConfigLabel">
+                  <span class="field-title">显示名称</span>
+                  <input id="cdnConfigLabel" class="text-input" type="text" value="qll-times CDN" />
+                </label>
+                <label class="field cdn-config-wide" for="cdnConfigUploadUrl">
+                  <span class="field-title">上传接口</span>
+                  <input
+                    id="cdnConfigUploadUrl"
+                    class="text-input"
+                    type="text"
+                    value="https://bt.qll-times.com/api/upload/file"
+                    spellcheck="false"
+                  />
+                  <span class="field-help">固定使用 POST multipart/form-data 上传。</span>
+                </label>
+                <label class="field cdn-config-wide" for="cdnConfigFilename">
+                  <span class="field-title">远端文件名模板</span>
+                  <input
+                    id="cdnConfigFilename"
+                    class="text-input"
+                    type="text"
+                    value="/temp/{{dateCompact}}/{{uuid}}.{{ext}}"
+                    spellcheck="false"
+                  />
+                  <span class="field-help">表单字段固定为 file（二进制）和 filename（此处生成的路径）。</span>
+                </label>
+              </div>
+              <div class="cdn-config-actions">
+                <button id="applyCdnConfigButton" class="secondary-button" type="button">应用页面配置</button>
+                <button id="useServerCdnConfigButton" class="secondary-button" type="button">恢复服务端默认</button>
+              </div>
+              <p id="cdnConfigMeta" class="subset-footnote">
+                上传成功后自动读取响应 JSON 的 data.url 作为最终访问地址。
+              </p>
+            </div>
+          </details>
+
           <label id="cdnUploadCard" class="toggle-card delivery-toggle is-disabled" for="uploadToCdn">
             <input id="uploadToCdn" type="checkbox" disabled />
             <span>
@@ -294,7 +368,7 @@
                 />
                 <span>
                   <strong>生成新的随机文件名</strong>
-                  <small>继续按服务端的 CDN_UPLOAD_FILENAME_TEMPLATE 生成，适合保留旧版本并产出新地址。</small>
+                  <small>继续按当前 CDN 文件名模板生成，适合保留旧版本并产出新地址。</small>
                 </span>
               </label>
             </div>

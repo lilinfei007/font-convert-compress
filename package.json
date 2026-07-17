@@ -4,6 +4,9 @@
   "description": "A small Node app with frontend support for converting, subsetting, and compressing font files.",
   "type": "module",
   "private": true,
+  "engines": {
+    "node": ">=16.0.0"
+  },
   "scripts": {
     "dev": "node server.js",
     "start": "node server.js"

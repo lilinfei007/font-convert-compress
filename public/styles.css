@@ -460,6 +460,66 @@ body {
   gap: 10px;
 }
 
+.source-alias-editor {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.source-alias-field {
+  margin-top: 0;
+}
+
+.repository-storage {
+  margin-top: 18px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 252, 247, 0.78);
+  overflow: hidden;
+}
+
+.repository-storage summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+  padding: 16px;
+  font-weight: 800;
+  color: var(--primary-deep);
+  cursor: pointer;
+}
+
+.repository-storage summary small {
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.repository-storage-body {
+  padding: 0 16px 16px;
+  border-top: 1px solid var(--line);
+}
+
+.repository-storage-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.repository-storage .subset-footnote {
+  margin: 12px 0 0;
+}
+
+@media (max-width: 700px) {
+  .repository-storage summary {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+}
+
 .secondary-button {
   border: 1px solid rgba(140, 51, 25, 0.24);
   border-radius: 999px;
@@ -667,6 +727,87 @@ body {
   margin-top: 18px;
 }
 
+.cdn-config-panel {
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 252, 247, 0.84);
+  overflow: hidden;
+}
+
+.cdn-config-panel summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+  padding: 16px;
+  font-weight: 800;
+  color: var(--primary-deep);
+  cursor: pointer;
+}
+
+.cdn-config-panel summary small {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.cdn-config-body {
+  padding: 0 16px 16px;
+  border-top: 1px solid var(--line);
+}
+
+.cdn-config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 12px;
+}
+
+.cdn-config-wide {
+  grid-column: 1 / -1;
+}
+
+.cdn-config-form-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 12px;
+}
+
+.cdn-config-form-fields.is-hidden,
+.cdn-config-grid > .is-hidden {
+  display: none;
+}
+
+.cdn-config-textarea {
+  min-height: 84px;
+  resize: vertical;
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 0.88rem;
+}
+
+.cdn-config-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.cdn-config-body > .subset-footnote {
+  margin: 12px 0 0;
+}
+
+@media (max-width: 700px) {
+  .cdn-config-grid,
+  .cdn-config-form-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .cdn-config-panel summary {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+}
+
 .delivery-toggle {
   margin-top: 0;
   transition:
@@ -764,6 +905,30 @@ body {
 .delivery-result a {
   color: inherit;
   font-weight: 700;
+}
+
+.cdn-raw-response {
+  margin-top: 12px;
+  color: var(--ink);
+}
+
+.cdn-raw-response summary {
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.cdn-raw-response pre {
+  max-height: 360px;
+  margin: 10px 0 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid rgba(53, 41, 33, 0.12);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.78);
+  color: var(--ink);
+  font: 0.82rem/1.55 Consolas, "SFMono-Regular", monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .preflight-panel {
@@ -1145,6 +1310,10 @@ body {
 
   .source-library-actions {
     justify-content: stretch;
+  }
+
+  .source-alias-editor {
+    grid-template-columns: 1fr;
   }
 
   .secondary-button {

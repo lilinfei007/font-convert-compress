@@ -1,6 +1,7 @@
 import { createServer, request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { createHash, randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { existsSync, readFileSync, promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -18,11 +19,19 @@ const runtimePort =
   typeof process !== 'undefined' && process?.env?.PORT ? Number(process.env.PORT) : 3000;
 const PORT = Number.isFinite(runtimePort) && runtimePort > 0 ? runtimePort : 3000;
 const MAX_BODY_SIZE = 60 * 1024 * 1024;
+const MAX_CDN_RESPONSE_SIZE = 1024 * 1024;
+const CDN_RESPONSE_TTL_MS = 10 * 60 * 1000;
+const MAX_STORED_CDN_RESPONSES = 20;
 const PUBLIC_DIR = path.join(APP_DIR, 'public');
 const CHARSET_DIR = path.join(APP_DIR, 'charsets');
-const DATA_DIR = path.join(APP_DIR, 'data');
+const DATA_DIR = resolveDataDir();
 const SOURCE_FONT_DIR = path.join(DATA_DIR, 'source-fonts');
+const SOURCE_META_DIR = path.join(DATA_DIR, 'source-metadata');
+const SUBSET_MATCH_DIR = path.join(DATA_DIR, 'subset-matches');
 const FONT_LIBRARY_FILE = path.join(DATA_DIR, 'font-library.json');
+const REPOSITORY_LIBRARY_FILE = 'font-library.json';
+const repositoryStorageContext = new AsyncLocalStorage();
+const cdnUploadResponses = new Map();
 
 const mimeTypes = new Map([
   ['.html', 'text/html; charset=utf-8'],
@@ -69,6 +78,7 @@ const charsetPresets = new Map([
   ]
 ]);
 const CDN_UPLOAD_CONFIG = createCdnUploadConfig();
+const REPOSITORY_STORAGE_CONFIG = createRepositoryStorageConfig();
 let woff2ReadyPromise;
 
 function loadLocalEnvFiles(rootDir) {
@@ -133,6 +143,11 @@ function getEnvBoolean(name, fallback = false) {
 function getEnvNumber(name, fallback) {
   const value = Number(getEnvString(name));
   return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function resolveDataDir() {
+  const configured = getEnvString('FONT_DATA_DIR');
+  return configured ? path.resolve(APP_DIR, configured) : path.join(APP_DIR, 'data');
 }
 
 function getEnvJsonObject(name) {
@@ -211,7 +226,92 @@ function createCdnUploadConfig() {
     bodyTemplateFile: getEnvString('CDN_UPLOAD_BODY_TEMPLATE_FILE'),
     filenameTemplate: getEnvString('CDN_UPLOAD_FILENAME_TEMPLATE', '{{filename}}'),
     formFileField: getEnvString('CDN_UPLOAD_FORM_FILE_FIELD', 'file'),
-    formFilenameField: getEnvString('CDN_UPLOAD_FORM_FILENAME_FIELD')
+    formFilenameField: getEnvString('CDN_UPLOAD_FORM_FILENAME_FIELD'),
+    responseUrlPath: getEnvString('CDN_RESPONSE_URL_PATH')
+  };
+}
+
+function normalizeCdnExtraHeaders(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  const blockedHeaders = new Set(['host', 'content-length', 'connection', 'transfer-encoding']);
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key, headerValue]) => {
+        const normalizedKey = String(key || '').trim();
+        return (
+          normalizedKey &&
+          /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(normalizedKey) &&
+          !blockedHeaders.has(normalizedKey.toLowerCase()) &&
+          headerValue !== undefined &&
+          headerValue !== null &&
+          !/[\r\n]/.test(String(headerValue))
+        );
+      })
+      .map(([key, headerValue]) => [String(key).trim(), String(headerValue)])
+  );
+}
+
+function normalizeClientCdnUploadConfig(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return CDN_UPLOAD_CONFIG;
+  }
+
+  const uploadUrlTemplate =
+    typeof value.uploadUrlTemplate === 'string' ? value.uploadUrlTemplate.trim() : '';
+  if (!uploadUrlTemplate) {
+    throw new Error('页面 CDN 配置缺少上传地址模板。');
+  }
+  if (!/^https?:\/\//i.test(uploadUrlTemplate)) {
+    throw new Error('CDN 上传地址模板必须以 http:// 或 https:// 开头。');
+  }
+
+  const method = typeof value.method === 'string' ? value.method.toUpperCase() : 'PUT';
+  const bodyMode = typeof value.bodyMode === 'string' ? value.bodyMode.toLowerCase() : 'raw';
+  const authHeader = typeof value.authHeader === 'string' ? value.authHeader.trim() : '';
+  const authToken = typeof value.authToken === 'string' ? value.authToken : '';
+  const blockedAuthHeaders = new Set(['host', 'content-length', 'connection', 'transfer-encoding']);
+  if (authHeader && !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(authHeader)) {
+    throw new Error('CDN 鉴权请求头名称不合法。');
+  }
+  if (blockedAuthHeaders.has(authHeader.toLowerCase())) {
+    throw new Error('CDN 鉴权请求头不能使用 Host、Content-Length 等连接控制字段。');
+  }
+  if (/[\r\n]/.test(authToken)) {
+    throw new Error('CDN 鉴权内容不能包含换行。');
+  }
+
+  const timeoutMs = Number(value.timeoutMs);
+  return {
+    available: true,
+    uploadUrlTemplate,
+    publicUrlTemplate:
+      typeof value.publicUrlTemplate === 'string' ? value.publicUrlTemplate.trim() : '',
+    label:
+      typeof value.label === 'string' && value.label.trim() ? value.label.trim() : 'CDN',
+    method: ['PUT', 'POST'].includes(method) ? method : 'PUT',
+    authHeader,
+    authToken,
+    extraHeaders: normalizeCdnExtraHeaders(value.extraHeaders),
+    autoUploadDefault: false,
+    timeoutMs: Number.isFinite(timeoutMs) && timeoutMs >= 1000 && timeoutMs <= 120000 ? timeoutMs : 20000,
+    bodyMode: ['raw', 'json', 'text', 'form'].includes(bodyMode) ? bodyMode : 'raw',
+    bodyTemplate: typeof value.bodyTemplate === 'string' ? value.bodyTemplate : '',
+    bodyTemplateFile: '',
+    filenameTemplate:
+      typeof value.filenameTemplate === 'string' && value.filenameTemplate.trim()
+        ? value.filenameTemplate.trim()
+        : '{{filename}}',
+    formFileField:
+      typeof value.formFileField === 'string' && value.formFileField.trim()
+        ? value.formFileField.trim()
+        : 'file',
+    formFilenameField:
+      typeof value.formFilenameField === 'string' ? value.formFilenameField.trim() : '',
+    responseUrlPath:
+      typeof value.responseUrlPath === 'string' ? value.responseUrlPath.trim() : ''
   };
 }
 
@@ -226,6 +326,313 @@ function hashBuffer(buffer) {
   return createHash('sha256').update(buffer).digest('hex');
 }
 
+function decodeRepositoryHeader(value) {
+  if (typeof value !== 'string' || !value.trim()) {
+    return '';
+  }
+
+  try {
+    return decodeURIComponent(value.trim());
+  } catch {
+    return value.trim();
+  }
+}
+
+function parseRepositoryUrl(value) {
+  const normalized = value.trim().replace(/^git@(github\.com|gitee\.com):/i, 'https://$1/');
+  let url;
+
+  try {
+    url = new URL(normalized);
+  } catch {
+    throw new Error('仓库地址格式不正确，请填写 GitHub 或 Gitee 仓库地址。');
+  }
+
+  const hostname = url.hostname.toLowerCase();
+  const provider = hostname === 'github.com' ? 'github' : hostname === 'gitee.com' ? 'gitee' : '';
+  if (!provider) {
+    throw new Error('当前仅支持 github.com 和 gitee.com 仓库。');
+  }
+
+  const parts = url.pathname.replace(/^\/+|\/+$/g, '').replace(/\.git$/i, '').split('/');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    throw new Error('仓库地址需要包含仓库所有者和仓库名。');
+  }
+
+  return {
+    provider,
+    owner: parts[0],
+    repository: parts[1]
+  };
+}
+
+function normalizeRepositoryDirectory(value) {
+  const normalized = String(value || 'font-data')
+    .replace(/\\/g, '/')
+    .replace(/^\/+|\/+$/g, '')
+    .split('/')
+    .filter((part) => part && part !== '.' && part !== '..')
+    .join('/');
+  return normalized || 'font-data';
+}
+
+function createRepositoryStorageConfig() {
+  const repositoryUrl = getEnvString('FONT_REPOSITORY_URL');
+  const token = getEnvString('FONT_REPOSITORY_TOKEN');
+  if (!repositoryUrl) {
+    return null;
+  }
+  if (!token) {
+    console.warn('Ignoring FONT_REPOSITORY_URL because FONT_REPOSITORY_TOKEN is empty.');
+    return null;
+  }
+
+  try {
+    return {
+      ...parseRepositoryUrl(repositoryUrl),
+      repositoryUrl,
+      token,
+      branch: getEnvString('FONT_REPOSITORY_BRANCH'),
+      directory: normalizeRepositoryDirectory(getEnvString('FONT_REPOSITORY_PATH', 'font-data'))
+    };
+  } catch (error) {
+    console.warn('Ignoring invalid FONT_REPOSITORY_URL:', error instanceof Error ? error.message : error);
+    return null;
+  }
+}
+
+function getRequestRepositoryConfig(request) {
+  const storageMode = decodeRepositoryHeader(request.headers['x-font-storage-mode']).toLowerCase();
+  if (storageMode === 'local') {
+    return null;
+  }
+
+  if (REPOSITORY_STORAGE_CONFIG) {
+    return REPOSITORY_STORAGE_CONFIG;
+  }
+  if (storageMode === 'remote') {
+    throw new Error('服务端未配置远程字体仓库环境变量。');
+  }
+  return null;
+}
+
+function getRepositoryConfig() {
+  return repositoryStorageContext.getStore() || null;
+}
+
+function encodeRepositoryPath(filePath) {
+  return filePath
+    .split('/')
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part))
+    .join('/');
+}
+
+function getRepositoryStoragePath(relativePath, config = getRepositoryConfig()) {
+  return `${config.directory}/${String(relativePath).replace(/^\/+/, '')}`;
+}
+
+function createRepositoryApiUrl(config, relativePath, includeRef = true) {
+  const encodedPath = encodeRepositoryPath(getRepositoryStoragePath(relativePath, config));
+  const baseUrl =
+    config.provider === 'github'
+      ? `https://api.github.com/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repository)}/contents/${encodedPath}`
+      : `https://gitee.com/api/v5/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repository)}/contents/${encodedPath}`;
+  const url = new URL(baseUrl);
+
+  if (includeRef && config.branch) {
+    url.searchParams.set('ref', config.branch);
+  }
+  if (config.provider === 'gitee') {
+    url.searchParams.set('access_token', config.token);
+  }
+
+  return url;
+}
+
+function createRepositoryInfoUrl(config) {
+  const baseUrl =
+    config.provider === 'github'
+      ? `https://api.github.com/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repository)}`
+      : `https://gitee.com/api/v5/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repository)}`;
+  const url = new URL(baseUrl);
+  if (config.provider === 'gitee') {
+    url.searchParams.set('access_token', config.token);
+  }
+  return url;
+}
+
+function requestRepositoryApi(config, url, { method = 'GET', headers = {}, body = null } = {}) {
+  return new Promise((resolve, reject) => {
+    const requestHeaders = {
+      'User-Agent': 'font-converter/1.0',
+      Accept: 'application/json',
+      ...headers
+    };
+    if (config.provider === 'github') {
+      requestHeaders.Authorization = `Bearer ${config.token}`;
+      requestHeaders['X-GitHub-Api-Version'] = '2022-11-28';
+    }
+    if (body) {
+      requestHeaders['Content-Type'] = 'application/json; charset=utf-8';
+      requestHeaders['Content-Length'] = String(body.length);
+    }
+
+    const remoteRequest = httpsRequest(
+      url,
+      { method, timeout: 30000, headers: requestHeaders },
+      (remoteResponse) => {
+        const chunks = [];
+        let totalSize = 0;
+        const responseLimit = Math.ceil((MAX_BODY_SIZE * 4) / 3) + 2 * 1024 * 1024;
+
+        remoteResponse.on('data', (chunk) => {
+          totalSize += chunk.length;
+          if (totalSize > responseLimit) {
+            remoteRequest.destroy(new Error('仓库返回的文件过大，请控制在 60MB 以内。'));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        remoteResponse.on('end', () => {
+          resolve({
+            statusCode: remoteResponse.statusCode || 0,
+            statusMessage: remoteResponse.statusMessage || '',
+            headers: remoteResponse.headers,
+            buffer: Buffer.concat(chunks)
+          });
+        });
+      }
+    );
+
+    remoteRequest.on('timeout', () => remoteRequest.destroy(new Error('连接字体仓库超时。')));
+    remoteRequest.on('error', reject);
+    remoteRequest.end(body || undefined);
+  });
+}
+
+function parseRepositoryApiPayload(result) {
+  if (!result.buffer.length) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(result.buffer.toString('utf8'));
+  } catch {
+    throw new Error(`字体仓库返回了无法解析的数据（HTTP ${result.statusCode}）。`);
+  }
+}
+
+function getRepositoryApiError(result, fallback) {
+  let detail = '';
+  try {
+    const payload = JSON.parse(result.buffer.toString('utf8'));
+    detail = payload?.message || payload?.error || '';
+  } catch {
+    detail = '';
+  }
+
+  if (result.statusCode === 401 || result.statusCode === 403) {
+    return new Error('仓库鉴权失败，请检查 Token 权限。');
+  }
+  if (result.statusCode === 404) {
+    return new Error('仓库或分支不存在，或者 Token 无权访问。');
+  }
+  return new Error(`${fallback}（HTTP ${result.statusCode}${detail ? `：${detail}` : ''}）。`);
+}
+
+async function verifyRepositoryAccess() {
+  const config = getRepositoryConfig();
+  const repositoryResult = await requestRepositoryApi(config, createRepositoryInfoUrl(config));
+  if (repositoryResult.statusCode < 200 || repositoryResult.statusCode >= 300) {
+    throw getRepositoryApiError(repositoryResult, '字体仓库连接失败');
+  }
+
+  if (!config.branch) {
+    return;
+  }
+
+  const branchUrl = createRepositoryInfoUrl(config);
+  branchUrl.pathname += `/branches/${encodeURIComponent(config.branch)}`;
+  const branchResult = await requestRepositoryApi(config, branchUrl);
+  if (branchResult.statusCode < 200 || branchResult.statusCode >= 300) {
+    if (branchResult.statusCode === 404) {
+      throw new Error(`仓库中不存在分支 ${config.branch}。`);
+    }
+    throw getRepositoryApiError(branchResult, '仓库分支读取失败');
+  }
+}
+
+async function readRepositoryFile(relativePath, { missingAllowed = false } = {}) {
+  const config = getRepositoryConfig();
+  const url = createRepositoryApiUrl(config, relativePath);
+  const result = await requestRepositoryApi(config, url);
+
+  if (result.statusCode === 404 && missingAllowed) {
+    return null;
+  }
+  if (result.statusCode < 200 || result.statusCode >= 300) {
+    throw getRepositoryApiError(result, '字体仓库文件读取失败');
+  }
+
+  const payload = parseRepositoryApiPayload(result);
+  let buffer = null;
+  if (typeof payload.content === 'string' && payload.content) {
+    buffer = Buffer.from(payload.content.replace(/\s/g, ''), 'base64');
+  } else if (config.provider === 'github') {
+    const rawResult = await requestRepositoryApi(config, url, {
+      headers: { Accept: 'application/vnd.github.raw' }
+    });
+    if (rawResult.statusCode < 200 || rawResult.statusCode >= 300) {
+      throw getRepositoryApiError(rawResult, '字体仓库文件下载失败');
+    }
+    buffer = rawResult.buffer;
+  }
+
+  if (!buffer) {
+    throw new Error('字体仓库没有返回文件内容。');
+  }
+
+  return { buffer, sha: typeof payload.sha === 'string' ? payload.sha : '' };
+}
+
+async function writeRepositoryFile(relativePath, buffer, message) {
+  const config = getRepositoryConfig();
+  const existing = await readRepositoryFile(relativePath, { missingAllowed: true });
+  const url = createRepositoryApiUrl(config, relativePath, false);
+  const payload = {
+    message,
+    content: buffer.toString('base64')
+  };
+  if (existing?.sha) payload.sha = existing.sha;
+  if (config.branch) payload.branch = config.branch;
+  if (config.provider === 'gitee') payload.access_token = config.token;
+  const body = Buffer.from(JSON.stringify(payload), 'utf8');
+  const method = config.provider === 'gitee' && !existing ? 'POST' : 'PUT';
+  const result = await requestRepositoryApi(config, url, { method, body });
+
+  if (result.statusCode < 200 || result.statusCode >= 300) {
+    throw getRepositoryApiError(result, '字体仓库文件写入失败');
+  }
+}
+
+async function deleteRepositoryFile(relativePath, message) {
+  const config = getRepositoryConfig();
+  const existing = await readRepositoryFile(relativePath, { missingAllowed: true });
+  if (!existing) return;
+
+  const url = createRepositoryApiUrl(config, relativePath, false);
+  const payload = { message, sha: existing.sha };
+  if (config.branch) payload.branch = config.branch;
+  if (config.provider === 'gitee') payload.access_token = config.token;
+  const body = Buffer.from(JSON.stringify(payload), 'utf8');
+  const result = await requestRepositoryApi(config, url, { method: 'DELETE', body });
+
+  if (result.statusCode < 200 || result.statusCode >= 300) {
+    throw getRepositoryApiError(result, '字体仓库文件删除失败');
+  }
+}
+
 function bufferToArrayBuffer(buffer) {
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
 }
@@ -234,6 +641,23 @@ function sanitizeBaseName(filename) {
   const raw = path.basename(filename, path.extname(filename));
   const cleaned = raw.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
   return cleaned || 'converted-font';
+}
+
+function sanitizeRecoveredSourceName(name, sourceHash, sourceType) {
+  const fallbackName = `${sourceHash}.${sourceType}`;
+  if (typeof name !== 'string' || !name.trim()) {
+    return fallbackName;
+  }
+
+  const basename = path.basename(name.trim());
+  const cleaned = basename.replace(/[<>:"/\\|?*\u0000-\u001f]+/g, '-').trim();
+
+  if (!cleaned) {
+    return fallbackName;
+  }
+
+  const expectedExtension = `.${sourceType.toLowerCase()}`;
+  return cleaned.toLowerCase().endsWith(expectedExtension) ? cleaned : `${cleaned}${expectedExtension}`;
 }
 
 function getFontType(filename) {
@@ -410,10 +834,20 @@ function createEmptyFontLibrary() {
   };
 }
 
+function normalizeFontLibrary(library) {
+  return {
+    ...createEmptyFontLibrary(),
+    ...(library && typeof library === 'object' ? library : {}),
+    sources: Array.isArray(library?.sources) ? library.sources : [],
+    subsetMatches: Array.isArray(library?.subsetMatches) ? library.subsetMatches : []
+  };
+}
+
 function publicSourceRecord(record) {
   return {
     sourceHash: record.sourceHash,
     sourceName: record.sourceName,
+    alias: record.alias || '',
     sourceSize: record.sourceSize,
     sourceType: record.sourceType,
     savedAt: record.savedAt,
@@ -421,26 +855,448 @@ function publicSourceRecord(record) {
   };
 }
 
+function normalizeSourceAlias(value) {
+  if (typeof value !== 'string') {
+    return '';
+  }
+
+  return value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+}
+
 async function ensureFontLibraryStorage() {
   await fs.mkdir(SOURCE_FONT_DIR, { recursive: true });
+  await fs.mkdir(SOURCE_META_DIR, { recursive: true });
+  await fs.mkdir(SUBSET_MATCH_DIR, { recursive: true });
+}
+
+function isMissingFileError(error) {
+  return error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT';
+}
+
+function getSourceMetadataPath(sourceHash) {
+  return path.join(SOURCE_META_DIR, `${sourceHash}.json`);
+}
+
+function getSubsetMatchMetadataPath(subsetHash) {
+  return path.join(SUBSET_MATCH_DIR, `${subsetHash}.json`);
+}
+
+async function readJsonFile(filePath, label) {
+  try {
+    const raw = await fs.readFile(filePath, 'utf8');
+    return JSON.parse(raw);
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      return null;
+    }
+
+    console.warn(`Failed to read ${label}:`, error);
+    return null;
+  }
+}
+
+async function writeJsonFile(filePath, payload) {
+  await fs.writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+}
+
+function normalizeTimestamp(value, fallback = 0) {
+  return Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : fallback;
+}
+
+function normalizeSourceRecord(record, fallback = {}) {
+  const sourceHash = typeof record?.sourceHash === 'string' && record.sourceHash.trim()
+    ? record.sourceHash.trim().toLowerCase()
+    : typeof fallback.sourceHash === 'string'
+      ? fallback.sourceHash
+      : '';
+  const sourceType =
+    typeof record?.sourceType === 'string' && supportedTypes.has(record.sourceType.toLowerCase())
+      ? record.sourceType.toLowerCase()
+      : typeof fallback.sourceType === 'string'
+        ? fallback.sourceType
+        : '';
+
+  if (!sourceHash || !sourceType) {
+    return null;
+  }
+
+  const storedFilename =
+    typeof record?.storedFilename === 'string' && record.storedFilename.trim()
+      ? record.storedFilename.trim()
+      : typeof fallback.storedFilename === 'string'
+        ? fallback.storedFilename
+        : `${sourceHash}.${sourceType}`;
+  const sourceSize = Number.isFinite(Number(record?.sourceSize))
+    ? Number(record.sourceSize)
+    : Number.isFinite(Number(fallback.sourceSize))
+      ? Number(fallback.sourceSize)
+      : 0;
+  const savedAt = normalizeTimestamp(record?.savedAt, normalizeTimestamp(fallback.savedAt));
+  const lastUsedAt = normalizeTimestamp(record?.lastUsedAt, savedAt || normalizeTimestamp(fallback.lastUsedAt));
+
+  return {
+    sourceHash,
+    sourceName: sanitizeRecoveredSourceName(
+      record?.sourceName || fallback.sourceName || '',
+      sourceHash,
+      sourceType
+    ),
+    alias: normalizeSourceAlias(record?.alias ?? fallback.alias ?? ''),
+    sourceSize,
+    sourceType,
+    storedFilename,
+    savedAt,
+    lastUsedAt
+  };
+}
+
+function normalizeSubsetMatchRecord(record) {
+  const subsetHash =
+    typeof record?.subsetHash === 'string' && record.subsetHash.trim()
+      ? record.subsetHash.trim().toLowerCase()
+      : '';
+  const sourceHash =
+    typeof record?.sourceHash === 'string' && record.sourceHash.trim()
+      ? record.sourceHash.trim().toLowerCase()
+      : '';
+
+  if (!subsetHash || !sourceHash) {
+    return null;
+  }
+
+  const savedAt = normalizeTimestamp(record?.savedAt);
+
+  return {
+    subsetHash,
+    sourceHash,
+    outputName: typeof record?.outputName === 'string' ? record.outputName : '',
+    outputBytes: Number.isFinite(Number(record?.outputBytes)) ? Number(record.outputBytes) : 0,
+    savedAt,
+    lastUsedAt: normalizeTimestamp(record?.lastUsedAt, savedAt)
+  };
+}
+
+function sameSourceRecord(left, right) {
+  return (
+    left?.sourceHash === right?.sourceHash &&
+    left?.sourceName === right?.sourceName &&
+    (left?.alias || '') === (right?.alias || '') &&
+    Number(left?.sourceSize || 0) === Number(right?.sourceSize || 0) &&
+    left?.sourceType === right?.sourceType &&
+    left?.storedFilename === right?.storedFilename &&
+    Number(left?.savedAt || 0) === Number(right?.savedAt || 0) &&
+    Number(left?.lastUsedAt || 0) === Number(right?.lastUsedAt || 0)
+  );
+}
+
+function sameSubsetMatchRecord(left, right) {
+  return (
+    left?.subsetHash === right?.subsetHash &&
+    left?.sourceHash === right?.sourceHash &&
+    left?.outputName === right?.outputName &&
+    Number(left?.outputBytes || 0) === Number(right?.outputBytes || 0) &&
+    Number(left?.savedAt || 0) === Number(right?.savedAt || 0) &&
+    Number(left?.lastUsedAt || 0) === Number(right?.lastUsedAt || 0)
+  );
+}
+
+function parseStoredSourceHash(storedFilename) {
+  const candidate = path.basename(storedFilename, path.extname(storedFilename)).toLowerCase();
+  return /^[a-f0-9]{64}$/.test(candidate) ? candidate : '';
+}
+
+function pickFontDisplayName(fontObject) {
+  const names = fontObject?.name || {};
+
+  for (const value of [
+    names.fullName,
+    names.fontFamily,
+    names.preferredFamily,
+    names.postScriptName
+  ]) {
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  return '';
+}
+
+async function inspectStoredSourceName(filePath, sourceType, sourceHash, cachedBuffer = null) {
+  try {
+    const sourceBuffer = cachedBuffer || (await fs.readFile(filePath));
+    if (!sourceBuffer.length) {
+      return '';
+    }
+
+    if (sourceType === 'woff2') {
+      await ensureWoff2Ready();
+    }
+
+    const source = sourceType === 'svg' ? sourceBuffer.toString('utf8') : sourceBuffer;
+    const font = createFont(source, {
+      type: sourceType,
+      compound2simple: false
+    });
+    const fontName = pickFontDisplayName(font.get());
+    return sanitizeRecoveredSourceName(fontName, sourceHash, sourceType);
+  } catch (error) {
+    console.warn(`Failed to inspect stored source font ${path.basename(filePath)}:`, error);
+    return '';
+  }
+}
+
+function sortSourceRecords(records) {
+  return [...records].sort((left, right) => {
+    const timeDelta = Number(right.savedAt || 0) - Number(left.savedAt || 0);
+    if (timeDelta !== 0) {
+      return timeDelta;
+    }
+
+    return String(left.sourceName || '').localeCompare(String(right.sourceName || ''), 'zh-Hans-CN');
+  });
+}
+
+function sortSubsetMatchRecords(records) {
+  return [...records].sort((left, right) => {
+    const lastUsedDelta = Number(right.lastUsedAt || 0) - Number(left.lastUsedAt || 0);
+    if (lastUsedDelta !== 0) {
+      return lastUsedDelta;
+    }
+
+    return String(left.outputName || '').localeCompare(String(right.outputName || ''), 'zh-Hans-CN');
+  });
+}
+
+async function persistSourceMetadataRecords(records) {
+  for (const record of records) {
+    await writeJsonFile(getSourceMetadataPath(record.sourceHash), record);
+  }
+}
+
+async function persistSubsetMatchMetadataRecords(records) {
+  for (const record of records) {
+    await writeJsonFile(getSubsetMatchMetadataPath(record.subsetHash), record);
+  }
+}
+
+async function syncSourceRecords(existingRecords) {
+  const normalizedExisting = Array.isArray(existingRecords)
+    ? existingRecords
+        .map((record) => normalizeSourceRecord(record))
+        .filter(Boolean)
+    : [];
+  const existingByHash = new Map(normalizedExisting.map((record) => [record.sourceHash, record]));
+  const entries = await fs.readdir(SOURCE_FONT_DIR, { withFileTypes: true });
+  const records = [];
+  const seenHashes = new Set();
+  let changed = false;
+
+  for (const entry of entries) {
+    if (!entry.isFile()) {
+      continue;
+    }
+
+    const sourceType = path.extname(entry.name).slice(1).toLowerCase();
+    if (!supportedTypes.has(sourceType)) {
+      continue;
+    }
+
+    const filePath = path.join(SOURCE_FONT_DIR, entry.name);
+    const stat = await fs.stat(filePath);
+    let sourceHash = parseStoredSourceHash(entry.name);
+    let sourceBuffer = null;
+
+    if (!sourceHash) {
+      sourceBuffer = await fs.readFile(filePath);
+      sourceHash = hashBuffer(sourceBuffer);
+    }
+
+    if (seenHashes.has(sourceHash)) {
+      changed = true;
+      continue;
+    }
+
+    const existingRecord = existingByHash.get(sourceHash) || null;
+    const metadataRecord = normalizeSourceRecord(
+      await readJsonFile(getSourceMetadataPath(sourceHash), `source metadata ${sourceHash}`)
+    );
+    let sourceName =
+      sanitizeRecoveredSourceName(
+        existingRecord?.sourceName || metadataRecord?.sourceName || '',
+        sourceHash,
+        sourceType
+      ) || '';
+
+    if (!sourceName || sourceName === `${sourceHash}.${sourceType}`) {
+      const inspectedName = await inspectStoredSourceName(filePath, sourceType, sourceHash, sourceBuffer);
+      if (inspectedName) {
+        sourceName = inspectedName;
+      }
+    }
+
+    const record = normalizeSourceRecord(
+      {
+        sourceHash,
+        sourceName,
+        alias: existingRecord?.alias || metadataRecord?.alias || '',
+        sourceSize: stat.size,
+        sourceType,
+        storedFilename: entry.name,
+        savedAt: existingRecord?.savedAt || metadataRecord?.savedAt || stat.birthtimeMs || stat.mtimeMs,
+        lastUsedAt:
+          existingRecord?.lastUsedAt || metadataRecord?.lastUsedAt || existingRecord?.savedAt || stat.mtimeMs
+      },
+      {
+        sourceHash,
+        sourceType,
+        storedFilename: entry.name
+      }
+    );
+
+    if (!record) {
+      continue;
+    }
+
+    if (!sameSourceRecord(existingRecord, record) || !sameSourceRecord(metadataRecord, record)) {
+      changed = true;
+    }
+
+    records.push(record);
+    seenHashes.add(sourceHash);
+  }
+
+  if (normalizedExisting.some((record) => !seenHashes.has(record.sourceHash))) {
+    changed = true;
+  }
+
+  const sortedRecords = sortSourceRecords(records);
+  return { records: sortedRecords, changed };
+}
+
+function preferSubsetMatchRecord(currentRecord, nextRecord) {
+  if (!currentRecord) {
+    return nextRecord;
+  }
+
+  const currentScore = Number(currentRecord.lastUsedAt || currentRecord.savedAt || 0);
+  const nextScore = Number(nextRecord.lastUsedAt || nextRecord.savedAt || 0);
+
+  return nextScore >= currentScore ? nextRecord : currentRecord;
+}
+
+async function syncSubsetMatchRecords(existingRecords, validSourceHashes) {
+  const recordMap = new Map();
+  const normalizedExisting = Array.isArray(existingRecords)
+    ? existingRecords
+        .map((record) => normalizeSubsetMatchRecord(record))
+        .filter(Boolean)
+    : [];
+  let changed = false;
+
+  for (const record of normalizedExisting) {
+    recordMap.set(record.subsetHash, record);
+  }
+
+  const entries = await fs.readdir(SUBSET_MATCH_DIR, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isFile() || path.extname(entry.name).toLowerCase() !== '.json') {
+      continue;
+    }
+
+    const storedRecord = normalizeSubsetMatchRecord(
+      await readJsonFile(path.join(SUBSET_MATCH_DIR, entry.name), `subset match metadata ${entry.name}`)
+    );
+
+    if (!storedRecord) {
+      continue;
+    }
+
+    const currentRecord = recordMap.get(storedRecord.subsetHash) || null;
+    const preferredRecord = preferSubsetMatchRecord(currentRecord, storedRecord);
+    recordMap.set(storedRecord.subsetHash, preferredRecord);
+
+    if (!sameSubsetMatchRecord(currentRecord, preferredRecord)) {
+      changed = true;
+    }
+  }
+
+  const validRecords = [];
+  for (const record of recordMap.values()) {
+    if (!validSourceHashes.has(record.sourceHash)) {
+      changed = true;
+      continue;
+    }
+
+    validRecords.push(record);
+  }
+
+  const sortedRecords = sortSubsetMatchRecords(validRecords);
+  return { records: sortedRecords, changed };
+}
+
+async function syncFontLibraryWithStorage(library) {
+  const normalizedLibrary = normalizeFontLibrary(library);
+  const sourceResult = await syncSourceRecords(normalizedLibrary.sources);
+  const validSourceHashes = new Set(sourceResult.records.map((record) => record.sourceHash));
+  const subsetResult = await syncSubsetMatchRecords(normalizedLibrary.subsetMatches, validSourceHashes);
+
+  const syncedLibrary = {
+    ...createEmptyFontLibrary(),
+    ...normalizedLibrary,
+    sources: sourceResult.records,
+    subsetMatches: subsetResult.records
+  };
+
+  return {
+    library: syncedLibrary,
+    changed:
+      sourceResult.changed ||
+      subsetResult.changed ||
+      syncedLibrary.sources.length !== normalizedLibrary.sources.length ||
+      syncedLibrary.subsetMatches.length !== normalizedLibrary.subsetMatches.length
+  };
 }
 
 async function readFontLibrary() {
+  if (getRepositoryConfig()) {
+    const stored = await readRepositoryFile(REPOSITORY_LIBRARY_FILE, { missingAllowed: true });
+    if (!stored) {
+      await verifyRepositoryAccess();
+      return createEmptyFontLibrary();
+    }
+
+    try {
+      return normalizeFontLibrary(JSON.parse(stored.buffer.toString('utf8')));
+    } catch {
+      throw new Error('仓库中的 font-library.json 无法解析。');
+    }
+  }
+
   await ensureFontLibraryStorage();
 
   try {
     const raw = await fs.readFile(FONT_LIBRARY_FILE, 'utf8');
-    const library = JSON.parse(raw);
+    const { library, changed } = await syncFontLibraryWithStorage(JSON.parse(raw));
 
-    return {
-      ...createEmptyFontLibrary(),
-      ...library,
-      sources: Array.isArray(library.sources) ? library.sources : [],
-      subsetMatches: Array.isArray(library.subsetMatches) ? library.subsetMatches : []
-    };
+    if (changed) {
+      await writeFontLibrary(library);
+    }
+
+    return library;
   } catch (error) {
-    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
-      return createEmptyFontLibrary();
+    if (isMissingFileError(error) || error instanceof SyntaxError) {
+      if (error instanceof SyntaxError) {
+        console.warn('Failed to parse font-library.json, rebuilding from stored font data:', error);
+      }
+
+      const { library, changed } = await syncFontLibraryWithStorage(createEmptyFontLibrary());
+
+      if (changed || !isMissingFileError(error)) {
+        await writeFontLibrary(library);
+      }
+
+      return library;
     }
 
     throw error;
@@ -448,8 +1304,21 @@ async function readFontLibrary() {
 }
 
 async function writeFontLibrary(library) {
+  if (getRepositoryConfig()) {
+    const normalizedLibrary = normalizeFontLibrary(library);
+    await writeRepositoryFile(
+      REPOSITORY_LIBRARY_FILE,
+      Buffer.from(`${JSON.stringify(normalizedLibrary, null, 2)}\n`, 'utf8'),
+      'Update font library index'
+    );
+    return;
+  }
+
   await ensureFontLibraryStorage();
-  await fs.writeFile(FONT_LIBRARY_FILE, `${JSON.stringify(library, null, 2)}\n`, 'utf8');
+  const normalizedLibrary = normalizeFontLibrary(library);
+  await writeJsonFile(FONT_LIBRARY_FILE, normalizedLibrary);
+  await persistSourceMetadataRecords(normalizedLibrary.sources);
+  await persistSubsetMatchMetadataRecords(normalizedLibrary.subsetMatches);
 }
 
 function getStoredSourcePath(record) {
@@ -464,11 +1333,20 @@ async function saveSourceFontBuffer(filename, buffer) {
   const library = await readFontLibrary();
   const existingRecord = library.sources.find((record) => record.sourceHash === sourceHash);
 
-  await fs.writeFile(path.join(SOURCE_FONT_DIR, storedFilename), buffer);
+  if (getRepositoryConfig()) {
+    await writeRepositoryFile(
+      `source-fonts/${storedFilename}`,
+      buffer,
+      `Save source font ${sanitizeRecoveredSourceName(filename, sourceHash, sourceType)}`
+    );
+  } else {
+    await fs.writeFile(path.join(SOURCE_FONT_DIR, storedFilename), buffer);
+  }
 
   const record = {
     sourceHash,
     sourceName: filename,
+    alias: existingRecord?.alias || '',
     sourceSize: buffer.length,
     sourceType,
     storedFilename,
@@ -510,7 +1388,9 @@ async function getSourceFontPayload(sourceHash) {
     throw new Error('未找到已保存的原始字体。');
   }
 
-  const buffer = await fs.readFile(getStoredSourcePath(record));
+  const buffer = getRepositoryConfig()
+    ? (await readRepositoryFile(`source-fonts/${record.storedFilename}`)).buffer
+    : await fs.readFile(getStoredSourcePath(record));
   return {
     record,
     filename: record.sourceName,
@@ -540,10 +1420,37 @@ async function deleteSourceFont(sourceHash) {
   }
 
   library.sources = library.sources.filter((item) => item.sourceHash !== sourceHash);
+  const removedMatches = library.subsetMatches.filter((item) => item.sourceHash === sourceHash);
   library.subsetMatches = library.subsetMatches.filter((item) => item.sourceHash !== sourceHash);
   await writeFontLibrary(library);
-  await fs.rm(getStoredSourcePath(record), { force: true });
+  if (getRepositoryConfig()) {
+    await deleteRepositoryFile(
+      `source-fonts/${record.storedFilename}`,
+      `Delete source font ${record.sourceName}`
+    );
+    return record;
+  }
 
+  await fs.rm(getStoredSourcePath(record), { force: true });
+  await fs.rm(getSourceMetadataPath(sourceHash), { force: true });
+
+  for (const match of removedMatches) {
+    await fs.rm(getSubsetMatchMetadataPath(match.subsetHash), { force: true });
+  }
+
+  return record;
+}
+
+async function setSourceFontAlias(sourceHash, alias) {
+  const library = await readFontLibrary();
+  const record = library.sources.find((item) => item.sourceHash === sourceHash);
+
+  if (!record) {
+    throw new Error('未找到要设置别名的原始字体。');
+  }
+
+  record.alias = normalizeSourceAlias(alias);
+  await writeFontLibrary(library);
   return record;
 }
 
@@ -791,6 +1698,16 @@ function fetchRemoteBuffer(urlString, redirectCount = 0) {
 
 function getPublicRuntimeConfig() {
   return {
+    repositoryStorage: {
+      available: Boolean(REPOSITORY_STORAGE_CONFIG),
+      provider: REPOSITORY_STORAGE_CONFIG?.provider || '',
+      repositoryUrl: REPOSITORY_STORAGE_CONFIG?.repositoryUrl || '',
+      branch: REPOSITORY_STORAGE_CONFIG?.branch || '',
+      path: REPOSITORY_STORAGE_CONFIG?.directory || 'font-data',
+      displayName: REPOSITORY_STORAGE_CONFIG
+        ? `${REPOSITORY_STORAGE_CONFIG.owner}/${REPOSITORY_STORAGE_CONFIG.repository}`
+        : ''
+    },
     cdnUpload: {
       available: CDN_UPLOAD_CONFIG.available,
       autoUploadDefault: CDN_UPLOAD_CONFIG.available && CDN_UPLOAD_CONFIG.autoUploadDefault,
@@ -895,7 +1812,7 @@ function renderJsonTemplateValue(value, templateValues) {
   return value;
 }
 
-function buildCdnTemplateValues(result, uploadContext = {}) {
+function buildCdnTemplateValues(result, uploadContext = {}, cdnConfig = CDN_UPLOAD_CONFIG) {
   const dateCompact = formatCompactDate();
   const uuid = randomUUID().replace(/-/g, '');
   const baseValues = {
@@ -917,7 +1834,7 @@ function buildCdnTemplateValues(result, uploadContext = {}) {
     uuid
   };
 
-  const renderedTemplateFilename = renderValueTemplate(CDN_UPLOAD_CONFIG.filenameTemplate, baseValues);
+  const renderedTemplateFilename = renderValueTemplate(cdnConfig.filenameTemplate, baseValues);
   const templateCdnFilename = String(renderedTemplateFilename || result.outputName)
     .trim()
     .replace(/\\/g, '/');
@@ -943,10 +1860,10 @@ function buildCdnTemplateValues(result, uploadContext = {}) {
   };
 }
 
-function readCdnStructuredTemplate(templateValues, label) {
+function readCdnStructuredTemplate(templateValues, label, cdnConfig = CDN_UPLOAD_CONFIG) {
   const templateText = readOptionalTemplateText({
-    inlineValue: CDN_UPLOAD_CONFIG.bodyTemplate,
-    filePath: CDN_UPLOAD_CONFIG.bodyTemplateFile,
+    inlineValue: cdnConfig.bodyTemplate,
+    filePath: cdnConfig.bodyTemplateFile,
     label
   }).trim();
 
@@ -1002,37 +1919,37 @@ function serializeMultipartFormData(parts) {
   };
 }
 
-function buildCdnRequestPayload(result, templateValues) {
-  if (CDN_UPLOAD_CONFIG.bodyMode === 'raw') {
+function buildCdnRequestPayload(result, templateValues, cdnConfig = CDN_UPLOAD_CONFIG) {
+  if (cdnConfig.bodyMode === 'raw') {
     return {
       body: result.buffer,
       contentType: outputContentTypes.get(result.outputType) || 'application/octet-stream'
     };
   }
 
-  if (CDN_UPLOAD_CONFIG.bodyMode === 'form') {
+  if (cdnConfig.bodyMode === 'form') {
     const structuredFields =
-      readCdnStructuredTemplate(templateValues, 'CDN 上传表单字段模板') || {};
+      readCdnStructuredTemplate(templateValues, 'CDN 上传表单字段模板', cdnConfig) || {};
     const fieldEntries = Object.entries(structuredFields).filter(
       ([fieldName, fieldValue]) =>
         fieldName &&
         fieldValue !== undefined &&
         fieldValue !== null &&
-        fieldName !== (CDN_UPLOAD_CONFIG.formFileField || 'file') &&
-        fieldName !== CDN_UPLOAD_CONFIG.formFilenameField
+        fieldName !== (cdnConfig.formFileField || 'file') &&
+        fieldName !== cdnConfig.formFilenameField
     );
     const parts = [
       {
-        name: CDN_UPLOAD_CONFIG.formFileField || 'file',
+        name: cdnConfig.formFileField || 'file',
         filename: templateValues.cdnBasename || result.outputName,
         contentType: outputContentTypes.get(result.outputType) || 'application/octet-stream',
         value: result.buffer
       }
     ];
 
-    if (CDN_UPLOAD_CONFIG.formFilenameField) {
+    if (cdnConfig.formFilenameField) {
       parts.push({
-        name: CDN_UPLOAD_CONFIG.formFilenameField,
+        name: cdnConfig.formFilenameField,
         value: templateValues.cdnFilename
       });
     }
@@ -1055,8 +1972,8 @@ function buildCdnRequestPayload(result, templateValues) {
   }
 
   const templateText = readOptionalTemplateText({
-    inlineValue: CDN_UPLOAD_CONFIG.bodyTemplate,
-    filePath: CDN_UPLOAD_CONFIG.bodyTemplateFile,
+    inlineValue: cdnConfig.bodyTemplate,
+    filePath: cdnConfig.bodyTemplateFile,
     label: 'CDN upload body template'
   }).trim();
 
@@ -1064,7 +1981,7 @@ function buildCdnRequestPayload(result, templateValues) {
     throw new Error('CDN 上传已启用自定义请求体，但没有提供模板。');
   }
 
-  if (CDN_UPLOAD_CONFIG.bodyMode === 'text') {
+  if (cdnConfig.bodyMode === 'text') {
     return {
       body: Buffer.from(String(renderValueTemplate(templateText, templateValues)), 'utf8'),
       contentType: 'text/plain; charset=utf-8'
@@ -1103,22 +2020,39 @@ function uploadBufferToUrl(urlString, { method, headers, body, timeoutMs }) {
       (remoteResponse) => {
         const statusCode = remoteResponse.statusCode || 0;
         const chunks = [];
+        let storedSize = 0;
+        let totalSize = 0;
 
         remoteResponse.on('data', (chunk) => {
-          chunks.push(chunk);
-        });
-
-        remoteResponse.on('end', () => {
-          if (statusCode < 200 || statusCode >= 300) {
-            reject(new Error(`CDN 上传失败（HTTP ${statusCode}）。`));
+          totalSize += chunk.length;
+          if (storedSize >= MAX_CDN_RESPONSE_SIZE) {
             return;
           }
 
-          resolve({
+          const remaining = MAX_CDN_RESPONSE_SIZE - storedSize;
+          const storedChunk = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
+          chunks.push(storedChunk);
+          storedSize += storedChunk.length;
+        });
+
+        remoteResponse.on('end', () => {
+          const cdnResponse = {
             statusCode,
+            statusMessage: remoteResponse.statusMessage || '',
             headers: remoteResponse.headers,
-            body: ''
-          });
+            body: Buffer.concat(chunks),
+            truncated: totalSize > storedSize,
+            totalSize
+          };
+
+          if (statusCode < 200 || statusCode >= 300) {
+            const error = new Error(`CDN 上传失败（HTTP ${statusCode}）。`);
+            error.cdnResponse = cdnResponse;
+            reject(error);
+            return;
+          }
+
+          resolve(cdnResponse);
         });
       }
     );
@@ -1131,69 +2065,145 @@ function uploadBufferToUrl(urlString, { method, headers, body, timeoutMs }) {
   });
 }
 
-async function uploadResultToCdn(result, uploadContext = {}) {
+function normalizeCdnResponseHeaders(headers) {
+  return Object.fromEntries(
+    Object.entries(headers || {}).map(([key, value]) => [
+      key,
+      Array.isArray(value) ? value.join(', ') : String(value ?? '')
+    ])
+  );
+}
+
+function cleanupCdnUploadResponses(now = Date.now()) {
+  for (const [responseId, entry] of cdnUploadResponses) {
+    if (now - entry.savedAt > CDN_RESPONSE_TTL_MS) {
+      cdnUploadResponses.delete(responseId);
+    }
+  }
+
+  while (cdnUploadResponses.size >= MAX_STORED_CDN_RESPONSES) {
+    const oldestKey = cdnUploadResponses.keys().next().value;
+    if (!oldestKey) break;
+    cdnUploadResponses.delete(oldestKey);
+  }
+}
+
+function storeCdnUploadResponse(cdnResponse) {
+  if (!cdnResponse || !Buffer.isBuffer(cdnResponse.body)) {
+    return '';
+  }
+
+  cleanupCdnUploadResponses();
+  const responseId = randomUUID();
+  cdnUploadResponses.set(responseId, {
+    savedAt: Date.now(),
+    payload: {
+      statusCode: cdnResponse.statusCode,
+      statusMessage: cdnResponse.statusMessage,
+      headers: normalizeCdnResponseHeaders(cdnResponse.headers),
+      bodyBase64: cdnResponse.body.toString('base64'),
+      truncated: Boolean(cdnResponse.truncated),
+      totalSize: Number(cdnResponse.totalSize || cdnResponse.body.length)
+    }
+  });
+  return responseId;
+}
+
+function getNestedResponseValue(payload, valuePath) {
+  if (!valuePath) {
+    return undefined;
+  }
+
+  return valuePath.split('.').reduce((current, key) => {
+    if (!current || typeof current !== 'object') {
+      return undefined;
+    }
+    return current[key];
+  }, payload);
+}
+
+function extractCdnResponseUrl(cdnResponse, responseUrlPath) {
+  if (!responseUrlPath || !cdnResponse?.body?.length) {
+    return '';
+  }
+
+  try {
+    const payload = JSON.parse(cdnResponse.body.toString('utf8'));
+    const value = getNestedResponseValue(payload, responseUrlPath);
+    return typeof value === 'string' && isHttpUrl(value.trim()) ? value.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+async function uploadResultToCdn(result, uploadContext = {}, cdnConfig = CDN_UPLOAD_CONFIG) {
   const runtime = {
     requested: true,
-    available: CDN_UPLOAD_CONFIG.available,
+    available: cdnConfig.available,
     succeeded: false,
     publicUrl: '',
     message: '',
-    filenameMode: 'template'
+    filenameMode: 'template',
+    responseId: ''
   };
 
-  if (!CDN_UPLOAD_CONFIG.available) {
+  if (!cdnConfig.available) {
     runtime.message = '服务端未配置 CDN 自动上传。';
     return runtime;
   }
 
-  const uploadValues = buildCdnTemplateValues(result, uploadContext);
+  const uploadValues = buildCdnTemplateValues(result, uploadContext, cdnConfig);
   runtime.filenameMode = uploadValues.cdnFilenameMode;
-  const uploadUrl = resolveCdnTemplate(CDN_UPLOAD_CONFIG.uploadUrlTemplate, uploadValues);
-  const publicUrl = CDN_UPLOAD_CONFIG.publicUrlTemplate
-    ? resolveCdnTemplate(CDN_UPLOAD_CONFIG.publicUrlTemplate, uploadValues)
+  const uploadUrl = resolveCdnTemplate(cdnConfig.uploadUrlTemplate, uploadValues);
+  const configuredPublicUrl = cdnConfig.publicUrlTemplate
+    ? resolveCdnTemplate(cdnConfig.publicUrlTemplate, uploadValues)
     : uploadValues.cdnFilenameMode === 'existing'
       ? buildPublicUrlFromExistingUrl(uploadContext.existingSubsetUrl || '', uploadValues.cdnFilename)
       : '';
   const requestPayload = buildCdnRequestPayload(result, {
     ...uploadValues,
-    publicUrl
-  });
+    publicUrl: configuredPublicUrl
+  }, cdnConfig);
   const headers = {
     'Content-Type': requestPayload.contentType,
     'Content-Length': String(requestPayload.body.length),
     'User-Agent': 'font-converter/1.0',
-    ...CDN_UPLOAD_CONFIG.extraHeaders
+    ...cdnConfig.extraHeaders
   };
 
-  if (CDN_UPLOAD_CONFIG.authHeader && CDN_UPLOAD_CONFIG.authToken) {
-    headers[CDN_UPLOAD_CONFIG.authHeader] = CDN_UPLOAD_CONFIG.authToken;
+  if (cdnConfig.authHeader && cdnConfig.authToken) {
+    headers[cdnConfig.authHeader] = cdnConfig.authToken;
   }
 
   try {
-    await uploadBufferToUrl(uploadUrl, {
-      method: CDN_UPLOAD_CONFIG.method,
+    const cdnResponse = await uploadBufferToUrl(uploadUrl, {
+      method: cdnConfig.method,
       headers,
       body: requestPayload.body,
-      timeoutMs: CDN_UPLOAD_CONFIG.timeoutMs
+      timeoutMs: cdnConfig.timeoutMs
     });
 
     runtime.succeeded = true;
-    runtime.publicUrl = publicUrl;
+    runtime.responseId = storeCdnUploadResponse(cdnResponse);
+    runtime.publicUrl =
+      extractCdnResponseUrl(cdnResponse, cdnConfig.responseUrlPath) || configuredPublicUrl;
+    const publicUrl = runtime.publicUrl;
     runtime.message =
       uploadValues.cdnFilenameMode === 'existing'
         ? publicUrl
-          ? `已上传到 ${CDN_UPLOAD_CONFIG.label}，并沿用原文件名覆盖原地址。`
-          : `已上传到 ${CDN_UPLOAD_CONFIG.label}，并沿用原文件名。`
+          ? `已上传到 ${cdnConfig.label}，并沿用原文件名覆盖原地址。`
+          : `已上传到 ${cdnConfig.label}，并沿用原文件名。`
         : publicUrl
-          ? `已上传到 ${CDN_UPLOAD_CONFIG.label}，可通过公开地址访问。`
-          : `已上传到 ${CDN_UPLOAD_CONFIG.label}。`;
+          ? `已上传到 ${cdnConfig.label}，可通过公开地址访问。`
+          : `已上传到 ${cdnConfig.label}。`;
     return runtime;
   } catch (error) {
     console.warn('CDN upload failed:', error);
+    runtime.responseId = storeCdnUploadResponse(error?.cdnResponse);
     runtime.message =
       error instanceof Error && /HTTP \d+/.test(error.message)
         ? error.message
-        : `${CDN_UPLOAD_CONFIG.label} 上传失败，请检查服务端配置或网络连接。`;
+        : `${cdnConfig.label} 上传失败，请检查配置或网络连接。`;
     return runtime;
   }
 }
@@ -1412,8 +2422,11 @@ async function handleConvert(request, response) {
       keepKerning = false,
       uploadToCdn = false,
       cdnFilenameMode = 'template',
+      cdnConfig = null,
       optimize = true
     } = JSON.parse(rawBody);
+
+    const activeCdnConfig = normalizeClientCdnUploadConfig(cdnConfig);
 
     let sourcePayload;
     let sourceRecordState = null;
@@ -1479,10 +2492,10 @@ async function handleConvert(request, response) {
         ? await uploadResultToCdn(result, {
             existingSubsetUrl: typeof existingSubsetUrl === 'string' ? existingSubsetUrl : '',
             cdnFilenameMode: typeof cdnFilenameMode === 'string' ? cdnFilenameMode : 'template'
-          })
+          }, activeCdnConfig)
         : {
             requested: false,
-            available: CDN_UPLOAD_CONFIG.available,
+            available: activeCdnConfig.available,
             succeeded: false,
             publicUrl: '',
             message: '',
@@ -1524,15 +2537,18 @@ async function handleConvert(request, response) {
       'X-Cdn-Upload-Available': String(cdnUpload.available),
       'X-Cdn-Upload-Requested': String(cdnUpload.requested),
       'X-Cdn-Upload-Succeeded': String(cdnUpload.succeeded),
-      'X-Cdn-Upload-Label': encodeURIComponent(CDN_UPLOAD_CONFIG.label),
+      'X-Cdn-Upload-Label': encodeURIComponent(activeCdnConfig.label),
       'X-Cdn-Upload-Url': encodeURIComponent(cdnUpload.publicUrl),
       'X-Cdn-Upload-Message': encodeURIComponent(cdnUpload.message),
-      'X-Cdn-Upload-Filename-Mode': cdnUpload.filenameMode
+      'X-Cdn-Upload-Filename-Mode': cdnUpload.filenameMode,
+      'X-Cdn-Upload-Response-Id': cdnUpload.responseId || ''
     });
     response.end(result.buffer);
   } catch (error) {
     const message = error instanceof Error ? error.message : '字体转换失败。';
-    const statusCode = /缺少|为空|支持|过大|格式|输出|未找到/.test(message) ? 400 : 500;
+    const statusCode = /缺少|为空|支持|过大|格式|输出|未找到|配置|模板|请求头|地址/.test(message)
+      ? 400
+      : 500;
     sendJson(response, statusCode, { error: message });
   }
 }
@@ -1624,6 +2640,20 @@ async function handleListSourceFonts(response) {
   }
 }
 
+function handleCdnUploadResponse(requestUrl, response) {
+  cleanupCdnUploadResponses();
+  const responseId = requestUrl.searchParams.get('id') || '';
+  const entry = cdnUploadResponses.get(responseId);
+
+  if (!entry) {
+    sendJson(response, 404, { error: 'CDN 原始响应不存在或已过期。' });
+    return;
+  }
+
+  cdnUploadResponses.delete(responseId);
+  sendJson(response, 200, entry.payload);
+}
+
 async function handleDeleteSourceFont(request, response) {
   try {
     const rawBody = await readRequestBody(request);
@@ -1641,6 +2671,29 @@ async function handleDeleteSourceFont(request, response) {
   } catch (error) {
     const message = error instanceof Error ? error.message : '原始字体移除失败。';
     const statusCode = /缺少|未找到/.test(message) ? 400 : 500;
+    sendJson(response, statusCode, { error: message });
+  }
+}
+
+async function handleSourceFontAlias(request, response) {
+  try {
+    const rawBody = await readRequestBody(request);
+    const { sourceHash = '', alias = '' } = JSON.parse(rawBody);
+
+    if (typeof sourceHash !== 'string' || !sourceHash.trim()) {
+      sendJson(response, 400, { error: '请求体缺少 sourceHash 字段。' });
+      return;
+    }
+    if (typeof alias !== 'string') {
+      sendJson(response, 400, { error: '字体别名必须是字符串。' });
+      return;
+    }
+
+    const record = await setSourceFontAlias(sourceHash.trim(), alias);
+    sendJson(response, 200, { source: publicSourceRecord(record) });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '字体别名保存失败。';
+    const statusCode = /缺少|未找到|必须/.test(message) ? 400 : 500;
     sendJson(response, statusCode, { error: message });
   }
 }
@@ -1703,62 +2756,84 @@ async function handleStatic(requestPath, response) {
 }
 
 const server = createServer(async (request, response) => {
-  const method = request.method || 'GET';
-  const requestUrl = new URL(request.url || '/', `http://${HOST}:${PORT}`);
-
-  if (method === 'GET' && requestUrl.pathname === '/api/health') {
-    sendJson(response, 200, {
-      ok: true,
-      supportedTypes: Array.from(supportedTypes),
-      writableTypes: Array.from(writableTypes),
-      ...getPublicRuntimeConfig()
+  let repositoryConfig;
+  try {
+    repositoryConfig = getRequestRepositoryConfig(request);
+  } catch (error) {
+    sendJson(response, 400, {
+      error: error instanceof Error ? error.message : '字体仓库配置无效。'
     });
     return;
   }
 
-  if (method === 'GET' && requestUrl.pathname === '/api/charsets') {
-    sendJson(response, 200, {
-      presets: listCharsetPresets()
-    });
-    return;
-  }
+  await repositoryStorageContext.run(repositoryConfig, async () => {
+    const method = request.method || 'GET';
+    const requestUrl = new URL(request.url || '/', `http://${HOST}:${PORT}`);
 
-  if (method === 'GET' && requestUrl.pathname === '/api/source-fonts') {
-    await handleListSourceFonts(response);
-    return;
-  }
+    if (method === 'GET' && requestUrl.pathname === '/api/health') {
+      sendJson(response, 200, {
+        ok: true,
+        supportedTypes: Array.from(supportedTypes),
+        writableTypes: Array.from(writableTypes),
+        ...getPublicRuntimeConfig()
+      });
+      return;
+    }
 
-  if (method === 'POST' && requestUrl.pathname === '/api/convert') {
-    await handleConvert(request, response);
-    return;
-  }
+    if (method === 'GET' && requestUrl.pathname === '/api/charsets') {
+      sendJson(response, 200, {
+        presets: listCharsetPresets()
+      });
+      return;
+    }
 
-  if (method === 'POST' && requestUrl.pathname === '/api/source-fonts/delete') {
-    await handleDeleteSourceFont(request, response);
-    return;
-  }
+    if (method === 'GET' && requestUrl.pathname === '/api/source-fonts') {
+      await handleListSourceFonts(response);
+      return;
+    }
 
-  if (method === 'POST' && requestUrl.pathname === '/api/source-match') {
-    await handleSourceMatch(request, response);
-    return;
-  }
+    if (method === 'GET' && requestUrl.pathname === '/api/cdn-upload-response') {
+      handleCdnUploadResponse(requestUrl, response);
+      return;
+    }
 
-  if (method === 'POST' && requestUrl.pathname === '/api/font-fingerprint') {
-    await handleFontFingerprint(request, response);
-    return;
-  }
+    if (method === 'POST' && requestUrl.pathname === '/api/convert') {
+      await handleConvert(request, response);
+      return;
+    }
 
-  if (method === 'POST' && requestUrl.pathname === '/api/font-preview') {
-    await handleFontPreview(request, response);
-    return;
-  }
+    if (method === 'POST' && requestUrl.pathname === '/api/source-fonts/delete') {
+      await handleDeleteSourceFont(request, response);
+      return;
+    }
 
-  if (method === 'GET') {
-    await handleStatic(requestUrl.pathname, response);
-    return;
-  }
+    if (method === 'POST' && requestUrl.pathname === '/api/source-fonts/alias') {
+      await handleSourceFontAlias(request, response);
+      return;
+    }
 
-  sendJson(response, 405, { error: '请求方法不受支持。' });
+    if (method === 'POST' && requestUrl.pathname === '/api/source-match') {
+      await handleSourceMatch(request, response);
+      return;
+    }
+
+    if (method === 'POST' && requestUrl.pathname === '/api/font-fingerprint') {
+      await handleFontFingerprint(request, response);
+      return;
+    }
+
+    if (method === 'POST' && requestUrl.pathname === '/api/font-preview') {
+      await handleFontPreview(request, response);
+      return;
+    }
+
+    if (method === 'GET') {
+      await handleStatic(requestUrl.pathname, response);
+      return;
+    }
+
+    sendJson(response, 405, { error: '请求方法不受支持。' });
+  });
 });
 
 server.listen(PORT, HOST, () => {

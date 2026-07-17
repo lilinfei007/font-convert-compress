@@ -25,7 +25,14 @@ const sourceFontSelect = document.querySelector('#sourceFontSelect');
 const useSavedSourceButton = document.querySelector('#useSavedSourceButton');
 const resetSourceButton = document.querySelector('#resetSourceButton');
 const deleteSavedSourceButton = document.querySelector('#deleteSavedSourceButton');
+const sourceFontAlias = document.querySelector('#sourceFontAlias');
+const saveSourceAliasButton = document.querySelector('#saveSourceAliasButton');
 const sourceLibraryMeta = document.querySelector('#sourceLibraryMeta');
+const repositoryStoragePanel = document.querySelector('#repositoryStoragePanel');
+const repositoryStorageSummary = document.querySelector('#repositoryStorageSummary');
+const connectRepositoryButton = document.querySelector('#connectRepositoryButton');
+const useLocalStorageButton = document.querySelector('#useLocalStorageButton');
+const repositoryStorageMeta = document.querySelector('#repositoryStorageMeta');
 const convertButton = document.querySelector('#convertButton');
 const status = document.querySelector('#status');
 const dropzone = document.querySelector('#dropzone');
@@ -62,6 +69,14 @@ const cdnUploadHelp = document.querySelector('#cdnUploadHelp');
 const cdnUploadResult = document.querySelector('#cdnUploadResult');
 const cdnFilenameModePanel = document.querySelector('#cdnFilenameModePanel');
 const cdnFilenameModeLead = document.querySelector('#cdnFilenameModeLead');
+const cdnConfigPanel = document.querySelector('#cdnConfigPanel');
+const cdnConfigSummary = document.querySelector('#cdnConfigSummary');
+const cdnConfigLabel = document.querySelector('#cdnConfigLabel');
+const cdnConfigUploadUrl = document.querySelector('#cdnConfigUploadUrl');
+const cdnConfigFilename = document.querySelector('#cdnConfigFilename');
+const applyCdnConfigButton = document.querySelector('#applyCdnConfigButton');
+const useServerCdnConfigButton = document.querySelector('#useServerCdnConfigButton');
+const cdnConfigMeta = document.querySelector('#cdnConfigMeta');
 const subsetModeInputs = Array.from(document.querySelectorAll('input[name="subsetMode"]'));
 const operationModeInputs = Array.from(document.querySelectorAll('input[name="operationMode"]'));
 const cdnFilenameModeInputs = Array.from(document.querySelectorAll('input[name="cdnFilenameMode"]'));
@@ -90,6 +105,8 @@ const FONT_FORMAT_HINTS = {
   svg: 'svg'
 };
 const PREVIEW_BATCH_SIZE = 600;
+const REPOSITORY_STORAGE_SESSION_KEY = 'font-converter-repository-storage';
+const CDN_CONFIG_SESSION_KEY = 'font-converter-cdn-config';
 
 let selectedFile = null;
 let charsetPresets = [];
@@ -123,6 +140,21 @@ let runtimeConfigState = {
   cdnUploadAvailable: false,
   cdnUploadDefault: false,
   cdnUploadLabel: 'CDN'
+};
+let serverCdnRuntimeState = {
+  available: false,
+  autoUploadDefault: false,
+  label: 'CDN'
+};
+let pageCdnConfigState = {
+  enabled: false,
+  config: null
+};
+let repositoryStorageState = {
+  enabled: true,
+  available: false,
+  path: 'font-data',
+  displayName: ''
 };
 let sourceInspectionState = {
   key: '',
@@ -171,12 +203,122 @@ function updateStatus(message, tone = 'default') {
   }
 }
 
+function apiFetch(resource, options = {}) {
+  const headers = new Headers(options.headers || {});
+
+  if (repositoryStorageState.available) {
+    headers.set('X-Font-Storage-Mode', repositoryStorageState.enabled ? 'remote' : 'local');
+  }
+
+  return window.fetch(resource, { ...options, headers });
+}
+
+function persistRepositoryStorageState() {
+  sessionStorage.setItem(
+    REPOSITORY_STORAGE_SESSION_KEY,
+    JSON.stringify({ enabled: repositoryStorageState.enabled })
+  );
+}
+
+function restoreRepositoryStorageState() {
+  try {
+    const stored = JSON.parse(sessionStorage.getItem(REPOSITORY_STORAGE_SESSION_KEY) || 'null');
+    repositoryStorageState.enabled = stored?.enabled !== false;
+    persistRepositoryStorageState();
+  } catch {
+    sessionStorage.removeItem(REPOSITORY_STORAGE_SESSION_KEY);
+  }
+}
+
+function renderRepositoryStorageState() {
+  connectRepositoryButton.disabled = !repositoryStorageState.available || repositoryStorageState.enabled;
+  useLocalStorageButton.disabled = !repositoryStorageState.available || !repositoryStorageState.enabled;
+
+  if (!repositoryStorageState.available) {
+    repositoryStorageSummary.textContent = '服务端未配置远程仓库';
+    repositoryStorageMeta.textContent =
+      '请在服务端环境变量中配置 FONT_REPOSITORY_URL、FONT_REPOSITORY_TOKEN、FONT_REPOSITORY_BRANCH 和 FONT_REPOSITORY_PATH。';
+    return;
+  }
+
+  if (repositoryStorageState.enabled) {
+    repositoryStorageSummary.textContent = `正在使用 ${repositoryStorageState.displayName}`;
+    repositoryStorageMeta.textContent = `字体操作将使用服务端配置的 ${repositoryStorageState.displayName} 仓库，数据目录为 ${repositoryStorageState.path}/；Token 不会发送到浏览器。`;
+    return;
+  }
+
+  repositoryStorageSummary.textContent = `当前使用本地存储（远程：${repositoryStorageState.displayName}）`;
+  repositoryStorageMeta.textContent = '远程仓库配置仍保留在服务端；点击“使用远程仓库”即可切回。';
+}
+
 function clearCdnUploadResult() {
   cdnUploadResult.replaceChildren();
   cdnUploadResult.className = 'delivery-result is-hidden';
 }
 
-function setCdnUploadResult({ tone = 'default', message, url = '' }) {
+function decodeBase64Text(value) {
+  if (!value) {
+    return '';
+  }
+
+  const binary = atob(value);
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  return new TextDecoder('utf-8').decode(bytes);
+}
+
+function formatCdnRawResponse(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return '';
+  }
+
+  if (payload.error) {
+    return payload.error;
+  }
+
+  const statusLine = `HTTP ${payload.statusCode || 0}${payload.statusMessage ? ` ${payload.statusMessage}` : ''}`;
+  const headerLines = Object.entries(payload.headers || {})
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}: ${value}`);
+  const contentType = String(payload.headers?.['content-type'] || '').toLowerCase();
+  const isTextResponse =
+    !contentType ||
+    contentType.startsWith('text/') ||
+    /json|xml|javascript|x-www-form-urlencoded/.test(contentType);
+  let body = '';
+
+  if (payload.bodyBase64) {
+    body = isTextResponse
+      ? decodeBase64Text(payload.bodyBase64)
+      : `[二进制响应，以下为 Base64]\n${payload.bodyBase64}`;
+  }
+
+  const sections = [statusLine];
+  if (headerLines.length) sections.push(headerLines.join('\n'));
+  if (body) sections.push(body);
+  if (payload.truncated) {
+    sections.push(`[响应共 ${payload.totalSize || 0} 字节，页面仅保留前 1MB]`);
+  }
+  return sections.join('\n\n');
+}
+
+async function loadCdnRawResponse(responseId) {
+  if (!responseId) {
+    return null;
+  }
+
+  try {
+    const response = await apiFetch(`/api/cdn-upload-response?id=${encodeURIComponent(responseId)}`);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return { error: payload.error || 'CDN 原始响应读取失败。' };
+    }
+    return payload;
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : 'CDN 原始响应读取失败。' };
+  }
+}
+
+function setCdnUploadResult({ tone = 'default', message, url = '', rawResponse = null }) {
   cdnUploadResult.replaceChildren();
 
   const text = document.createElement('span');
@@ -191,6 +333,19 @@ function setCdnUploadResult({ tone = 'default', message, url = '' }) {
     link.rel = 'noreferrer';
     link.textContent = '打开链接';
     cdnUploadResult.append(link);
+  }
+
+  if (rawResponse) {
+    const details = document.createElement('details');
+    details.className = 'cdn-raw-response';
+    const summary = document.createElement('summary');
+    summary.textContent = rawResponse.statusCode
+      ? `CDN 原始响应（HTTP ${rawResponse.statusCode}）`
+      : 'CDN 原始响应';
+    const pre = document.createElement('pre');
+    pre.textContent = formatCdnRawResponse(rawResponse);
+    details.append(summary, pre);
+    cdnUploadResult.append(details);
   }
 
   cdnUploadResult.className = `delivery-result is-${tone}`;
@@ -227,29 +382,142 @@ function updateCdnFilenameModePanel() {
       : '当前子集字体来自网络地址。你可以直接覆盖这份 CDN 文件，或生成一个新的随机地址。';
 }
 
-function applyRuntimeConfig(payload) {
-  const cdnConfig =
-    payload?.cdnUpload && typeof payload.cdnUpload === 'object' ? payload.cdnUpload : {};
+function createDefaultPageCdnConfig() {
+  return {
+    label: 'qll-times CDN',
+    uploadUrlTemplate: 'https://bt.qll-times.com/api/upload/file',
+    publicUrlTemplate: '',
+    method: 'POST',
+    filenameTemplate: '/temp/{{dateCompact}}/{{uuid}}.{{ext}}',
+    authHeader: '',
+    authToken: '',
+    bodyMode: 'form',
+    timeoutMs: 20000,
+    formFileField: 'file',
+    formFilenameField: 'filename',
+    extraHeaders: {},
+    bodyTemplate: '',
+    responseUrlPath: 'data.url'
+  };
+}
+
+function populateCdnConfigForm(config = createDefaultPageCdnConfig()) {
+  cdnConfigLabel.value = config.label || 'qll-times CDN';
+  cdnConfigUploadUrl.value = config.uploadUrlTemplate || 'https://bt.qll-times.com/api/upload/file';
+  cdnConfigFilename.value = config.filenameTemplate || '/temp/{{dateCompact}}/{{uuid}}.{{ext}}';
+}
+
+function readCdnConfigForm() {
+  const uploadUrlTemplate = cdnConfigUploadUrl.value.trim();
+
+  if (!/^https?:\/\//i.test(uploadUrlTemplate)) {
+    throw new Error('上传接口必须以 http:// 或 https:// 开头。');
+  }
+
+  return {
+    ...createDefaultPageCdnConfig(),
+    label: cdnConfigLabel.value.trim() || 'qll-times CDN',
+    uploadUrlTemplate,
+    filenameTemplate:
+      cdnConfigFilename.value.trim() || '/temp/{{dateCompact}}/{{uuid}}.{{ext}}'
+  };
+}
+
+function persistPageCdnConfig() {
+  if (!pageCdnConfigState.enabled || !pageCdnConfigState.config) {
+    sessionStorage.removeItem(CDN_CONFIG_SESSION_KEY);
+    return;
+  }
+  sessionStorage.setItem(CDN_CONFIG_SESSION_KEY, JSON.stringify(pageCdnConfigState.config));
+}
+
+function restorePageCdnConfig() {
+  try {
+    const stored = JSON.parse(sessionStorage.getItem(CDN_CONFIG_SESSION_KEY) || 'null');
+    if (!stored?.uploadUrlTemplate) {
+      populateCdnConfigForm();
+      return;
+    }
+    const migratedConfig = {
+      ...createDefaultPageCdnConfig(),
+      label: stored.label || 'qll-times CDN',
+      uploadUrlTemplate: stored.uploadUrlTemplate,
+      filenameTemplate: stored.filenameTemplate || '/temp/{{dateCompact}}/{{uuid}}.{{ext}}'
+    };
+    pageCdnConfigState = { enabled: true, config: migratedConfig };
+    persistPageCdnConfig();
+    populateCdnConfigForm(migratedConfig);
+  } catch {
+    sessionStorage.removeItem(CDN_CONFIG_SESSION_KEY);
+    populateCdnConfigForm();
+  }
+}
+
+function syncEffectiveCdnRuntime({ resetChecked = false } = {}) {
+  const pageConfig = pageCdnConfigState.enabled ? pageCdnConfigState.config : null;
+  const effective = pageConfig
+    ? { available: true, autoUploadDefault: false, label: pageConfig.label || 'CDN' }
+    : serverCdnRuntimeState;
+  const wasChecked = uploadToCdn.checked;
 
   runtimeConfigState = {
-    cdnUploadAvailable: Boolean(cdnConfig.available),
-    cdnUploadDefault: Boolean(cdnConfig.available && cdnConfig.autoUploadDefault),
-    cdnUploadLabel:
-      typeof cdnConfig.label === 'string' && cdnConfig.label.trim() ? cdnConfig.label.trim() : 'CDN'
+    cdnUploadAvailable: Boolean(effective.available),
+    cdnUploadDefault: Boolean(effective.available && effective.autoUploadDefault),
+    cdnUploadLabel: effective.label || 'CDN'
   };
-
   uploadToCdn.disabled = !runtimeConfigState.cdnUploadAvailable;
-  uploadToCdn.checked = runtimeConfigState.cdnUploadAvailable && runtimeConfigState.cdnUploadDefault;
-  cdnUploadHelp.textContent = runtimeConfigState.cdnUploadAvailable
-    ? `服务端已连接 ${runtimeConfigState.cdnUploadLabel}。勾选后会在转换完成后由服务端代为上传，敏感凭据不会下发到浏览器。`
-    : '服务端未配置 CDN 上传，当前只会直接下载结果文件。';
+  uploadToCdn.checked = runtimeConfigState.cdnUploadAvailable &&
+    (resetChecked ? runtimeConfigState.cdnUploadDefault : wasChecked);
+
+  if (pageConfig) {
+    cdnConfigSummary.textContent = `正在使用页面配置：${runtimeConfigState.cdnUploadLabel}`;
+    cdnConfigMeta.textContent = '页面配置已启用并覆盖服务端 .env；Token 和自定义请求头只保存在当前标签页。';
+    cdnUploadHelp.textContent = `已启用页面配置 ${runtimeConfigState.cdnUploadLabel}，勾选后由本地 Node 服务执行上传。`;
+  } else {
+    cdnConfigSummary.textContent = runtimeConfigState.cdnUploadAvailable
+      ? `使用服务端默认：${runtimeConfigState.cdnUploadLabel}`
+      : '服务端默认配置未启用';
+    cdnConfigMeta.textContent = '页面配置会覆盖 .env 中的 CDN 设置；敏感内容只保存在当前浏览器标签页。';
+    cdnUploadHelp.textContent = runtimeConfigState.cdnUploadAvailable
+      ? `服务端已配置 ${runtimeConfigState.cdnUploadLabel}。勾选后会在转换完成后由服务端代为上传。`
+      : '服务端和页面均未配置 CDN 上传，当前只会直接下载结果文件。';
+  }
+
+  useServerCdnConfigButton.disabled = !pageCdnConfigState.enabled;
   updateCdnUploadCardState();
   updateCdnFilenameModePanel();
 }
 
+function applyRuntimeConfig(payload) {
+  const cdnConfig =
+    payload?.cdnUpload && typeof payload.cdnUpload === 'object' ? payload.cdnUpload : {};
+  const repositoryConfig =
+    payload?.repositoryStorage && typeof payload.repositoryStorage === 'object'
+      ? payload.repositoryStorage
+      : {};
+
+  serverCdnRuntimeState = {
+    available: Boolean(cdnConfig.available),
+    autoUploadDefault: Boolean(cdnConfig.available && cdnConfig.autoUploadDefault),
+    label: typeof cdnConfig.label === 'string' && cdnConfig.label.trim() ? cdnConfig.label.trim() : 'CDN'
+  };
+  repositoryStorageState = {
+    ...repositoryStorageState,
+    available: Boolean(repositoryConfig.available),
+    enabled: Boolean(repositoryConfig.available && repositoryStorageState.enabled),
+    path: typeof repositoryConfig.path === 'string' && repositoryConfig.path ? repositoryConfig.path : 'font-data',
+    displayName:
+      typeof repositoryConfig.displayName === 'string' && repositoryConfig.displayName
+        ? repositoryConfig.displayName
+        : '远程字体仓库'
+  };
+  renderRepositoryStorageState();
+  syncEffectiveCdnRuntime({ resetChecked: true });
+}
+
 async function loadRuntimeConfig() {
   try {
-    const response = await fetch('/api/health');
+    const response = await apiFetch('/api/health');
     if (!response.ok) {
       throw new Error('运行时配置读取失败。');
     }
@@ -257,17 +525,14 @@ async function loadRuntimeConfig() {
     const payload = await response.json();
     applyRuntimeConfig(payload);
   } catch (error) {
-    runtimeConfigState = {
-      cdnUploadAvailable: false,
-      cdnUploadDefault: false,
-      cdnUploadLabel: 'CDN'
-    };
-    uploadToCdn.disabled = true;
-    uploadToCdn.checked = false;
-    cdnUploadHelp.textContent =
-      error instanceof Error ? `${error.message} 当前只会直接下载结果文件。` : '当前只会直接下载结果文件。';
-    updateCdnUploadCardState();
-    updateCdnFilenameModePanel();
+    serverCdnRuntimeState = { available: false, autoUploadDefault: false, label: 'CDN' };
+    repositoryStorageState = { ...repositoryStorageState, available: false, enabled: false };
+    renderRepositoryStorageState();
+    syncEffectiveCdnRuntime({ resetChecked: true });
+    if (!pageCdnConfigState.enabled) {
+      cdnUploadHelp.textContent =
+        error instanceof Error ? `${error.message} 当前只会直接下载结果文件。` : '当前只会直接下载结果文件。';
+    }
   }
 }
 
@@ -316,6 +581,10 @@ function formatSizeDelta(sourceBytes, outputBytes) {
   }
 
   return `${formatBytes(sourceBytes)} -> ${formatBytes(outputBytes)}，大小不变`;
+}
+
+function getSourceDisplayName(record, fallback = '原始字体') {
+  return record?.alias?.trim() || record?.sourceName?.trim() || fallback;
 }
 
 function formatCodePoint(codePoint) {
@@ -604,7 +873,7 @@ function getCurrentSourceInspectionTarget() {
   if (selectedLibrarySource?.sourceHash) {
     return {
       key: `library:${selectedLibrarySource.sourceHash}`,
-      sourceLabel: selectedLibrarySource.sourceName || '已保存原始字体',
+      sourceLabel: getSourceDisplayName(selectedLibrarySource, '已保存原始字体'),
       kind: 'saved',
       sourceFontHash: selectedLibrarySource.sourceHash
     };
@@ -613,7 +882,7 @@ function getCurrentSourceInspectionTarget() {
   if (getSelectedOperationMode() === 'incremental' && matchedSourceState?.sourceHash) {
     return {
       key: `matched:${matchedSourceState.sourceHash}`,
-      sourceLabel: matchedSourceState.sourceName || '自动匹配原始字体',
+      sourceLabel: getSourceDisplayName(matchedSourceState, '自动匹配原始字体'),
       kind: 'saved',
       sourceFontHash: matchedSourceState.sourceHash
     };
@@ -678,7 +947,7 @@ async function inspectSourceFontForPreflight(force = false) {
             includeData: false
           };
 
-    const response = await fetch('/api/font-preview', {
+    const response = await apiFetch('/api/font-preview', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -756,12 +1025,12 @@ function getPreflightState() {
   } else if (selectedLibrarySource?.sourceHash) {
     items.push({
       tone: 'ready',
-      message: `原始全量字体将复用已保存项：${selectedLibrarySource.sourceName}。`
+      message: `原始全量字体将复用已保存项：${getSourceDisplayName(selectedLibrarySource)}。`
     });
   } else if (operationMode === 'incremental' && matchedSourceState?.sourceHash) {
     items.push({
       tone: 'ready',
-      message: `原始全量字体已自动匹配：${matchedSourceState.sourceName}。`
+      message: `原始全量字体已自动匹配：${getSourceDisplayName(matchedSourceState)}。`
     });
   } else if (operationMode === 'incremental' && getExistingSubsetMatchTarget()) {
     items.push({
@@ -939,10 +1208,10 @@ function updateSourceFontMeta() {
     message = `${selectedFile.name} (${formatBytes(selectedFile.size)})`;
     applySourceStatePresentation('manual', '已上传', '当前会使用你刚上传的原始全量字体。');
   } else if (selectedLibrarySource) {
-    message = `已保存：${selectedLibrarySource.sourceName} (${formatBytes(selectedLibrarySource.sourceSize)})`;
+    message = `已保存：${getSourceDisplayName(selectedLibrarySource)} (${formatBytes(selectedLibrarySource.sourceSize)})`;
     applySourceStatePresentation('library', '已选保存项', '当前会使用服务端已保存的原始字体。');
   } else if (getSelectedOperationMode() === 'incremental' && matchedSourceState?.sourceName) {
-    message = `自动匹配：${matchedSourceState.sourceName} (${formatBytes(matchedSourceState.sourceSize)})`;
+    message = `自动匹配：${getSourceDisplayName(matchedSourceState)} (${formatBytes(matchedSourceState.sourceSize)})`;
     applySourceStatePresentation('matched', '自动匹配成功', '系统已根据当前子集字体自动匹配到这份原始全量字体。');
   } else {
     message =
@@ -1051,7 +1320,9 @@ function renderSourceLibrary() {
   for (const record of sortedRecords) {
     const option = document.createElement('option');
     option.value = record.sourceHash;
-    option.textContent = `${record.sourceName || '原始字体'} (${formatBytes(record.sourceSize || 0)})`;
+    const displayName = getSourceDisplayName(record);
+    const originalName = record.alias ? ` · ${record.sourceName}` : '';
+    option.textContent = `${displayName}${originalName} (${formatBytes(record.sourceSize || 0)})`;
     sourceFontSelect.append(option);
   }
 
@@ -1060,24 +1331,30 @@ function renderSourceLibrary() {
   }
 
   const hasSelection = Boolean(sourceFontSelect.value);
+  const aliasRecord = sourceLibraryRecords.find((item) => item.sourceHash === sourceFontSelect.value) || null;
   const hasExplicitSelection = hasExplicitSourceSelection();
   useSavedSourceButton.disabled = !hasSelection;
   resetSourceButton.disabled = !hasExplicitSelection;
   deleteSavedSourceButton.disabled = !hasSelection;
+  sourceFontAlias.disabled = !hasSelection;
+  saveSourceAliasButton.disabled = !hasSelection;
+  sourceFontAlias.value = aliasRecord?.alias || '';
   sourceLibraryMeta.textContent =
     operationMode === 'incremental'
       ? sourceLibraryRecords.length
-        ? `服务端已保存 ${sourceLibraryRecords.length} 个原始字体。自动匹配不合适时，可以直接从这里手动指定来源。`
+        ? `${repositoryStorageState.enabled ? '仓库' : '服务端'}已保存 ${sourceLibraryRecords.length} 个原始字体。自动匹配不合适时，可以直接从这里手动指定来源。`
         : '当前还没有已保存的原始字体可供手动指定；完成一次转换后，原始字体会自动出现在这里。'
       : sourceLibraryRecords.length
-        ? `服务端已保存 ${sourceLibraryRecords.length} 个原始字体，可直接复用作为新的压缩来源。`
-        : '完成一次转换后，原始字体会自动保存在服务端数据目录，后续可直接从这里选择。';
+        ? `${repositoryStorageState.enabled ? '仓库' : '服务端'}已保存 ${sourceLibraryRecords.length} 个原始字体，可直接复用作为新的压缩来源。`
+        : repositoryStorageState.enabled
+          ? '完成一次转换后，原始字体会自动保存到当前仓库，后续可直接从这里选择。'
+          : '完成一次转换后，原始字体会自动保存在服务端数据目录，后续可直接从这里选择。';
   updateWorkflowCopy();
 }
 
 async function loadSourceLibrary() {
   try {
-    const response = await fetch('/api/source-fonts');
+    const response = await apiFetch('/api/source-fonts');
 
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
@@ -1087,10 +1364,12 @@ async function loadSourceLibrary() {
     const payload = await response.json();
     sourceLibraryRecords = Array.isArray(payload.sources) ? payload.sources : [];
     renderSourceLibrary();
+    return true;
   } catch (error) {
     sourceLibraryRecords = [];
     renderSourceLibrary();
     sourceLibraryMeta.textContent = error instanceof Error ? error.message : '原始字体列表读取失败。';
+    return false;
   }
 }
 
@@ -1100,9 +1379,9 @@ function selectSavedSource(record) {
   if (selectedLibrarySource) {
     selectedFile = null;
     fileInput.value = '';
-    updateStatus(`已选择保存的原始字体：${selectedLibrarySource.sourceName}。`);
+    updateStatus(`已选择保存的原始字体：${getSourceDisplayName(selectedLibrarySource)}。`);
     if (getSelectedOperationMode() === 'incremental') {
-      sourceMatchMeta.textContent = `将使用已保存的原始字体：${selectedLibrarySource.sourceName}。`;
+      sourceMatchMeta.textContent = `将使用已保存的原始字体：${getSourceDisplayName(selectedLibrarySource)}。`;
     }
   }
 
@@ -1724,7 +2003,7 @@ async function inspectExistingSubsetForPreview() {
       };
     }
 
-    const response = await fetch('/api/font-preview', {
+    const response = await apiFetch('/api/font-preview', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -1788,12 +2067,13 @@ function applyMatchedSource(record, matchKey) {
     matchKey,
     sourceHash: record.sourceHash || '',
     sourceName: record.sourceName || '原始字体',
+    alias: record.alias || '',
     sourceSize: Number(record.sourceSize || 0),
     sourceType: record.sourceType || '',
     savedAt: Number(record.savedAt || 0)
   };
 
-  sourceMatchMeta.textContent = `已自动匹配原始字体：${matchedSourceState.sourceName}（${formatBytes(
+  sourceMatchMeta.textContent = `已自动匹配原始字体：${getSourceDisplayName(matchedSourceState)}（${formatBytes(
     matchedSourceState.sourceSize
   )}）。`;
   updateSourceFontMeta();
@@ -1802,7 +2082,7 @@ function applyMatchedSource(record, matchKey) {
 }
 
 async function getRemoteSubsetFingerprint(url) {
-  const response = await fetch('/api/font-fingerprint', {
+  const response = await apiFetch('/api/font-fingerprint', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json'
@@ -1824,7 +2104,7 @@ async function getRemoteSubsetFingerprint(url) {
 }
 
 async function getServerSourceMatch(subsetHash) {
-  const response = await fetch('/api/source-match', {
+  const response = await apiFetch('/api/source-match', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json'
@@ -1985,7 +2265,7 @@ async function previewOutputFont(blob, outputName, previewCharacters = []) {
 
   try {
     const data = await readFileAsBase64(blob);
-    const response = await fetch('/api/font-preview', {
+    const response = await apiFetch('/api/font-preview', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -2012,7 +2292,7 @@ async function previewOutputFont(blob, outputName, previewCharacters = []) {
 
 async function loadCharsetPresets() {
   try {
-    const response = await fetch('/api/charsets');
+    const response = await apiFetch('/api/charsets');
     if (!response.ok) {
       throw new Error('系统预设加载失败。');
     }
@@ -2181,7 +2461,7 @@ async function convertSelectedFile() {
           : `正在使用 ${subsetPayload.label} 压缩并转换为 ${outputLabel}${cdnUploadLead}，请稍候...`;
     updateStatus(jobLabel, 'busy');
 
-    const response = await fetch('/api/convert', {
+    const response = await apiFetch('/api/convert', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -2202,6 +2482,8 @@ async function convertSelectedFile() {
         keepHinting: keepHinting.checked,
         keepKerning: keepKerning.checked,
         uploadToCdn: shouldUploadToCdn,
+        cdnConfig:
+          shouldUploadToCdn && pageCdnConfigState.enabled ? pageCdnConfigState.config : null,
         cdnFilenameMode:
           shouldUploadToCdn && operationMode === 'incremental' && existingSubsetPayload?.url
             ? getSelectedCdnFilenameMode()
@@ -2247,6 +2529,8 @@ async function convertSelectedFile() {
     const cdnUploadUrl = decodeURIComponent(response.headers.get('X-Cdn-Upload-Url') || '');
     const cdnUploadMessage = decodeURIComponent(response.headers.get('X-Cdn-Upload-Message') || '');
     const cdnUploadFilenameMode = response.headers.get('X-Cdn-Upload-Filename-Mode') || '';
+    const cdnUploadResponseId = response.headers.get('X-Cdn-Upload-Response-Id') || '';
+    const cdnRawResponse = await loadCdnRawResponse(cdnUploadResponseId);
     const fallbackName = `${sourcePayload.filename.replace(/\.[^.]+$/, '') || 'converted-font'}.${responseOutputType}`;
     const outputName = decodeURIComponent(
       contentDisposition.match(/filename="(.+?)"/)?.[1] || fallbackName
@@ -2313,13 +2597,15 @@ async function convertSelectedFile() {
       setCdnUploadResult({
         tone: 'success',
         message: cdnUploadMessage || `已同步到 ${cdnUploadLabel}。`,
-        url: cdnUploadUrl
+        url: cdnUploadUrl,
+        rawResponse: cdnRawResponse
       });
     } else if (cdnUploadRequested) {
       notes.push(`${cdnUploadLabel} 上传未完成`);
       setCdnUploadResult({
         tone: 'error',
-        message: cdnUploadMessage || `${cdnUploadLabel} 上传失败，请检查服务端配置。`
+        message: cdnUploadMessage || `${cdnUploadLabel} 上传失败，请检查服务端配置。`,
+        rawResponse: cdnRawResponse
       });
     }
     if (renderedOutputPreview) {
@@ -2373,10 +2659,91 @@ uploadToCdn.addEventListener('change', () => {
   updateCdnFilenameModePanel();
 });
 
+applyCdnConfigButton.addEventListener('click', () => {
+  try {
+    const config = readCdnConfigForm();
+    pageCdnConfigState = { enabled: true, config };
+    persistPageCdnConfig();
+    syncEffectiveCdnRuntime();
+    uploadToCdn.checked = true;
+    updateCdnUploadCardState();
+    updateCdnFilenameModePanel();
+    cdnConfigMeta.textContent = `页面配置已生效：转换完成后可上传到 ${config.label}。敏感内容只保存在当前标签页。`;
+    updateStatus(`已应用 CDN 页面配置：${config.label}。`);
+  } catch (error) {
+    cdnConfigPanel.open = true;
+    cdnConfigMeta.textContent = error instanceof Error ? error.message : 'CDN 页面配置无效。';
+    updateStatus(cdnConfigMeta.textContent, 'error');
+  }
+});
+
+useServerCdnConfigButton.addEventListener('click', () => {
+  pageCdnConfigState = { enabled: false, config: null };
+  persistPageCdnConfig();
+  populateCdnConfigForm();
+  syncEffectiveCdnRuntime({ resetChecked: true });
+  updateStatus(
+    serverCdnRuntimeState.available
+      ? `已恢复服务端 CDN 默认配置：${serverCdnRuntimeState.label}。`
+      : '已清除页面 CDN 配置；服务端默认配置未启用。'
+  );
+});
+
 sourceFontSelect.addEventListener('change', () => {
   const hasSelection = Boolean(sourceFontSelect.value);
+  const record = sourceLibraryRecords.find((item) => item.sourceHash === sourceFontSelect.value) || null;
   useSavedSourceButton.disabled = !hasSelection;
   deleteSavedSourceButton.disabled = !hasSelection;
+  sourceFontAlias.disabled = !hasSelection;
+  saveSourceAliasButton.disabled = !hasSelection;
+  sourceFontAlias.value = record?.alias || '';
+});
+
+saveSourceAliasButton.addEventListener('click', async () => {
+  const sourceHash = sourceFontSelect.value;
+  const record = sourceLibraryRecords.find((item) => item.sourceHash === sourceHash) || null;
+  if (!record) {
+    updateStatus('请选择要设置别名的字体。', 'error');
+    return;
+  }
+
+  try {
+    saveSourceAliasButton.disabled = true;
+    const response = await apiFetch('/api/source-fonts/alias', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sourceHash, alias: sourceFontAlias.value })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || '字体别名保存失败。');
+    }
+
+    const updatedRecord = payload.source || { ...record, alias: sourceFontAlias.value.trim() };
+    sourceLibraryRecords = sourceLibraryRecords.map((item) =>
+      item.sourceHash === sourceHash ? updatedRecord : item
+    );
+    if (selectedLibrarySource?.sourceHash === sourceHash) {
+      selectedLibrarySource = updatedRecord;
+      updateSourceFontMeta();
+    }
+    if (matchedSourceState?.sourceHash === sourceHash) {
+      matchedSourceState = { ...matchedSourceState, alias: updatedRecord.alias || '' };
+      sourceMatchMeta.textContent = `已自动匹配原始字体：${getSourceDisplayName(matchedSourceState)}（${formatBytes(
+        matchedSourceState.sourceSize
+      )}）。`;
+      updateSourceFontMeta();
+    }
+    renderSourceLibrary();
+    updateStatus(
+      updatedRecord.alias
+        ? `已保存字体别名：${updatedRecord.alias}。`
+        : `已清除字体 ${updatedRecord.sourceName} 的别名。`
+    );
+  } catch (error) {
+    saveSourceAliasButton.disabled = false;
+    updateStatus(error instanceof Error ? error.message : '字体别名保存失败。', 'error');
+  }
 });
 
 useSavedSourceButton.addEventListener('click', () => {
@@ -2388,6 +2755,13 @@ useSavedSourceButton.addEventListener('click', () => {
   }
 
   selectSavedSource(record);
+});
+
+sourceFontAlias.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !saveSourceAliasButton.disabled) {
+    event.preventDefault();
+    saveSourceAliasButton.click();
+  }
 });
 
 resetSourceButton.addEventListener('click', () => {
@@ -2404,7 +2778,7 @@ deleteSavedSourceButton.addEventListener('click', async () => {
   }
 
   try {
-    const response = await fetch('/api/source-fonts/delete', {
+    const response = await apiFetch('/api/source-fonts/delete', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -2426,7 +2800,11 @@ deleteSavedSourceButton.addEventListener('click', async () => {
     }
 
     renderSourceLibrary();
-    updateStatus(`已从本地列表移除：${record.sourceName}。`);
+    updateStatus(
+      repositoryStorageState.enabled
+        ? `已从字体仓库删除：${getSourceDisplayName(record)}。`
+        : `已从本地列表移除：${getSourceDisplayName(record)}。`
+    );
   } catch (error) {
     updateStatus(error instanceof Error ? error.message : '原始字体移除失败。', 'error');
   }
@@ -2434,6 +2812,45 @@ deleteSavedSourceButton.addEventListener('click', async () => {
 
 subsetPreviewMore.addEventListener('click', () => {
   appendPreviewCharacters('subset');
+});
+
+connectRepositoryButton.addEventListener('click', async () => {
+  if (!repositoryStorageState.available) {
+    repositoryStorageMeta.textContent = '服务端尚未配置远程字体仓库环境变量。';
+    repositoryStoragePanel.open = true;
+    return;
+  }
+
+  repositoryStorageState.enabled = true;
+  persistRepositoryStorageState();
+  renderRepositoryStorageState();
+  connectRepositoryButton.disabled = true;
+  repositoryStorageMeta.textContent = '正在读取服务端远程字体仓库...';
+  const succeeded = await loadSourceLibrary();
+
+  if (succeeded) {
+    selectedLibrarySource = null;
+    matchedSourceState = null;
+    renderSourceLibrary();
+    renderRepositoryStorageState();
+    updateStatus(`已切换到远程字体仓库：${repositoryStorageState.displayName}。`);
+  } else {
+    repositoryStorageMeta.textContent = sourceLibraryMeta.textContent;
+    repositoryStoragePanel.open = true;
+    connectRepositoryButton.disabled = false;
+  }
+});
+
+useLocalStorageButton.addEventListener('click', async () => {
+  repositoryStorageState.enabled = false;
+  selectedLibrarySource = null;
+  matchedSourceState = null;
+  persistRepositoryStorageState();
+  renderRepositoryStorageState();
+  await loadSourceLibrary();
+  updateSourceFontMeta();
+  updateConvertButtonState();
+  updateStatus('已切换为本地字体存储，远程仓库环境变量配置仍保留在服务端。');
 });
 
 subsetPreviewCopy.addEventListener('click', () => {
@@ -2518,7 +2935,7 @@ existingSubsetFile.addEventListener('change', async () => {
   try {
     await cacheExistingSubsetFile(file);
     if (selectedFile || selectedLibrarySource) {
-      const sourceName = selectedFile?.name || selectedLibrarySource.sourceName;
+      const sourceName = selectedFile?.name || getSourceDisplayName(selectedLibrarySource);
       sourceMatchMeta.textContent = `将使用${selectedFile ? '手动上传' : '已保存'}的原始字体：${sourceName}。`;
     } else {
       scheduleOriginalSourceMatch();
@@ -2540,7 +2957,7 @@ existingSubsetFile.addEventListener('change', async () => {
 existingSubsetUrl.addEventListener('input', () => {
   updateExistingSubsetMeta();
   if (selectedFile || selectedLibrarySource) {
-    const sourceName = selectedFile?.name || selectedLibrarySource.sourceName;
+    const sourceName = selectedFile?.name || getSourceDisplayName(selectedLibrarySource);
     sourceMatchMeta.textContent = `将使用${selectedFile ? '手动上传' : '已保存'}的原始字体：${sourceName}。`;
   } else {
     scheduleOriginalSourceMatch();
@@ -2588,9 +3005,16 @@ dropzone.addEventListener('drop', (event) => {
   setSelectedFile(file);
 });
 
-syncUI();
-updateExistingSubsetMeta();
-updateCdnUploadCardState();
-void loadRuntimeConfig();
-void loadSourceLibrary();
-void loadCharsetPresets();
+async function initializeApp() {
+  syncUI();
+  updateExistingSubsetMeta();
+  updateCdnUploadCardState();
+  restoreRepositoryStorageState();
+  renderRepositoryStorageState();
+  restorePageCdnConfig();
+  syncEffectiveCdnRuntime();
+  await loadRuntimeConfig();
+  await Promise.all([loadSourceLibrary(), loadCharsetPresets()]);
+}
+
+void initializeApp();

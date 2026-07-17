@@ -11,7 +11,7 @@
 当前界面地址默认是：
 
 ```text
-http://127.0.0.1:3101/
+http://127.0.0.1:3000/
 ```
 
 ## 功能概览
@@ -88,6 +88,76 @@ PORT=3101
 http://127.0.0.1:3101/
 ```
 
+### 数据目录配置
+
+原始字体列表和自动匹配记录默认保存在：
+
+```text
+data/
+```
+
+这个目录默认被 `.gitignore` 忽略，因此：
+
+- 推送到 GitHub 时不会带上这些数据
+- 换电脑后重新 `git clone`，原始字体列表会是空的
+
+如果你希望换电脑时更容易迁移，建议在 `.env.local` 里配置独立数据目录：
+
+```ini
+FONT_DATA_DIR=../font-tool-data
+```
+
+或 Windows 绝对路径：
+
+```ini
+FONT_DATA_DIR=D:/font-tool-data
+```
+
+这样项目代码和字体数据就解耦了：
+
+- 重拉代码不会覆盖数据目录
+- 迁移时只需要额外拷走这个目录
+- 可以把它放进网盘、NAS、同步盘，或你自己的备份目录
+
+### 使用 GitHub / Gitee 仓库存储字体
+
+服务端配置好环境变量后，页面中的“GitHub / Gitee 字体仓库”可以在远程仓库和本地数据目录之间切换。使用远程模式时，以下操作都会直接读取或修改该仓库：
+
+- 获取已保存原始字体列表
+- 复用仓库中的原始字体
+- 保存新上传的原始字体和子集匹配记录
+- 自动匹配子集对应的原始字体
+- 删除已保存原始字体
+
+在 `.env.local` 或部署平台环境变量中配置：
+
+```ini
+FONT_REPOSITORY_URL=https://github.com/owner/repository
+FONT_REPOSITORY_TOKEN=replace-with-repository-token
+FONT_REPOSITORY_BRANCH=
+FONT_REPOSITORY_PATH=font-data
+```
+
+- `FONT_REPOSITORY_URL`：GitHub 或 Gitee 仓库地址
+- `FONT_REPOSITORY_TOKEN`：仓库内容读写 Token
+- `FONT_REPOSITORY_BRANCH`：可留空使用默认分支
+- `FONT_REPOSITORY_PATH`：仓库内数据目录，默认 `font-data`
+
+GitHub Token 可使用 fine-grained personal access token，并为目标仓库授予 `Contents: Read and write`。Gitee Token 需要目标仓库的读写权限。
+
+Token 只存在于服务端环境变量中，不会下发或保存到浏览器。
+
+点击“改用本地存储”只会切换当前字体数据源，不会修改服务端环境变量。在当前标签页中点击“使用远程仓库”，即可重新切回环境变量配置的仓库。
+
+仓库目录结构如下：
+
+```text
+font-data/font-library.json
+font-data/source-fonts/<字体 SHA-256>.<扩展名>
+```
+
+未连接仓库或点击“改用本地存储”后，程序会继续使用本地 `data/`（或 `FONT_DATA_DIR`）目录。远端仓库和本地字体库相互独立，不会自动迁移已有字体。
+
 ## 项目目录
 
 ```text
@@ -95,11 +165,31 @@ public/                    前端页面与样式
 charsets/                  系统预设字符集
 data/source-fonts/         服务端保存的原始字体
 data/font-library.json     原始字体与子集匹配记录
+data/source-metadata/      原始字体补充元数据（用于恢复列表）
+data/subset-matches/       子集与原始字体匹配记录副本
 server.js                  Node 服务入口
 .env.example               CDN 配置示例
 .cdn-upload-body.example.json
 .cdn-upload-form.example.json
 ```
+
+## 部署说明
+
+本项目依赖 `server.js` 完成字体解析转换、GitHub/Gitee 字体仓库操作和 CDN 上传，不是纯静态网站。
+
+- GitHub Pages 只能托管静态文件，不能直接运行本项目后端。
+- Cloudflare Pages 不能直接运行当前的 Node `http` 服务；改成 Pages Functions/Worker 还会受到请求体、CPU、内存和 Node API 兼容性限制。
+- 推荐部署到支持常驻 Node.js 服务的平台，例如 Render、Railway、Fly.io、云服务器或自己的 NAS。
+
+通用 Node 部署配置：
+
+```text
+安装命令：npm ci
+启动命令：npm start
+Node 版本：16.20 或更高
+```
+
+部署平台如果使用临时文件系统，建议在页面中启用 GitHub/Gitee 字体仓库存储，不要依赖服务器本地 `data/` 目录长期保存字体。
 
 ## 使用流程
 
@@ -163,6 +253,41 @@ server.js                  Node 服务入口
 
 系统就可以自动找回对应的原始全量字体。
 
+“已保存原始字体”区域支持为字体设置别名。别名只用于页面显示，不修改原始文件名、字体内容或格式；本地存储时写入字体索引和元数据，使用 GitHub/Gitee 存储时写入远程仓库的 `font-library.json`。将别名输入框留空并保存即可清除别名。
+
+补充说明：
+
+- 如果 `font-library.json` 丢了，但 `source-fonts/` 还在，服务端启动后会自动重建“原始字体列表”
+- 如果 `subset-matches/` 也还在，子集字体与原始字体的自动匹配关系也能一起恢复
+- 如果整个数据目录都没保留下来，那么 GitHub 仓库本身无法帮你找回这些本地字体数据
+
+### 3.1 换电脑迁移建议
+
+推荐迁移以下整个数据目录：
+
+- 默认情况：`data/`
+- 如果配置了 `FONT_DATA_DIR`：迁移该目录即可
+
+最稳妥的做法是：
+
+1. 在旧电脑上关闭服务
+2. 复制整个字体数据目录
+3. 在新电脑上把它放到同样的位置，或修改 `.env.local` 中的 `FONT_DATA_DIR`
+4. 启动服务，让系统自动校验并补全索引
+
+如果你现在只有 `source-fonts/`，没有 `font-library.json`：
+
+1. 把已有字体文件放回数据目录下的 `source-fonts/`
+2. 启动服务
+3. 系统会自动重建原始字体列表
+
+如果你希望连“哪些子集对应哪份原始字体”的自动匹配也一起保留，请同时保留：
+
+- `font-library.json`
+- `subset-matches/`
+
+或直接保留整个数据目录，最省事。
+
 ### 4. 输出预览
 
 转换完成后，页面会展示：
@@ -193,18 +318,26 @@ server.js                  Node 服务入口
 
 ## CDN 自动上传
 
-页面中的“压缩完成后自动上传 CDN”开关由服务端配置决定：
+CDN 上传支持两种配置来源：
 
-- 如果服务端未配置 CDN，开关会禁用
-- 如果服务端已配置 CDN，浏览器只知道“能不能上传”
-- 真实的上传地址、鉴权头、Token 都只保存在服务端
+- 页面“CDN 上传配置”中的可视化配置
+- 服务端 `.env.local` / `.env` 默认配置
 
-这意味着：
+页面配置启用后会覆盖服务端默认配置；点击“恢复服务端默认”后重新使用环境变量配置。如果两处都没有上传地址，“压缩完成后自动上传 CDN”开关会禁用。
 
-- 敏感信息不会暴露到前端页面
-- 浏览器不会直接拿到 CDN 密钥
+页面可视化配置已经按当前上传接口精简为：
 
-## CDN 配置方式
+- CDN 显示名称
+- 上传接口，默认 `https://bt.qll-times.com/api/upload/file`
+- 远端文件名模板
+
+页面配置固定使用 `POST multipart/form-data`，二进制字段名为 `file`，远端路径字段名为 `filename`。上传成功后自动读取响应 JSON 的 `data.url` 作为最终公开地址。服务端环境变量模式仍保留通用 CDN 配置能力。
+
+页面配置只保存在当前标签页的 `sessionStorage`，转换请求会把配置交给本地 Node 服务，再由服务端上传；不会写入项目文件。使用环境变量时，真实地址和 Token 仍只保存在服务端，不会下发到浏览器。
+
+上传完成后，结果区域会提供可展开的“CDN 原始响应”，显示 CDN 返回的 HTTP 状态、响应头和响应正文。响应内容通过一次性临时记录读取，读取后立即删除；单次最多保留前 1MB，超过时页面会标记为已截断。
+
+## CDN 服务端配置方式
 
 建议新建本地配置文件：
 
@@ -428,6 +561,8 @@ charsets/
   - 执行字体转换、压缩、增量更新、可选 CDN 上传
 - `POST /api/source-fonts/delete`
   - 删除已保存原始字体
+- `POST /api/source-fonts/alias`
+  - 设置或清除已保存原始字体的显示别名
 - `POST /api/source-match`
   - 根据子集指纹查找原始字体匹配
 - `POST /api/font-fingerprint`
