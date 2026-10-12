@@ -5,7 +5,3 @@ data/
 .env
 .env.*
 !.env.example
-.cdn-upload-body*.json
-!.cdn-upload-body.example.json
-.cdn-upload-form*.json
-!.cdn-upload-form.example.json

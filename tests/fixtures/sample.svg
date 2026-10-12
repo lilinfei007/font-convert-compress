@@ -1,0 +1,12 @@
+<?xml version="1.0" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg">
+  <defs><font id="WorkflowTest" horiz-adv-x="600">
+    <font-face font-family="Workflow Test" units-per-em="1000" ascent="800" descent="-200" />
+    <missing-glyph horiz-adv-x="600" d="M50 0V700H550V0Z" />
+    <glyph glyph-name="space" unicode=" " horiz-adv-x="300" />
+    <glyph glyph-name="A" unicode="A" d="M40 0L250 700H350L560 0H450L300 520L150 0Z" />
+    <glyph glyph-name="B" unicode="B" d="M80 0V700H380L500 550V400L400 350L520 250V100L380 0Z" />
+    <glyph glyph-name="C" unicode="C" d="M500 600L400 700H150L50 600V100L150 0H400L500 100H180V600Z" />
+    <glyph glyph-name="one" unicode="1" d="M200 0V600H100L300 700H350V0Z" />
+  </font></defs>
+</svg>

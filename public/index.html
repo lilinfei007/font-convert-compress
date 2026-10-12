@@ -1,415 +1,94 @@
 <!doctype html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>字体格式转换工具</title>
-    <link rel="stylesheet" href="/theme-refresh.css" />
-  </head>
-  <body>
-    <main class="shell">
-      <section class="hero">
-        <p class="eyebrow">FONT TOOLKIT</p>
-        <h1>字体处理工作台</h1>
-        <p class="lead">
-          转换格式、提取字符子集、复用字体仓库，并将结果同步到 CDN。
-        </p>
-        <div class="hero-pills" aria-label="核心功能">
-          <span>格式转换</span>
-          <span>字符瘦身</span>
-          <span>仓库同步</span>
-        </div>
-      </section>
-
-      <section class="panel">
-        <section class="workflow-card workflow-card--mode" aria-label="处理模式">
-          <div class="workflow-copy">
-            <p class="workflow-eyebrow">Workflow</p>
-            <h2 id="operationTitle" class="workflow-title">先选择处理模式</h2>
-            <p id="operationLead" class="workflow-lead">
-              新建子集和增量更新的入口不同，先选模式，下面的步骤会跟着一起变化。
-            </p>
-          </div>
-          <div class="operation-switch" role="radiogroup" aria-label="处理模式">
-            <label class="source-option" for="operationFresh">
-              <input id="operationFresh" type="radio" name="operationMode" value="fresh" checked />
-              <span>
-                <strong>新建子集</strong>
-                <small>从原始全量字体直接生成新的目标格式字体</small>
-              </span>
-            </label>
-
-            <label class="source-option" for="operationIncremental">
-              <input id="operationIncremental" type="radio" name="operationMode" value="incremental" />
-              <span>
-                <strong>增量更新</strong>
-                <small>在现有子集字体的字符基础上，合并新增字符重新生成</small>
-              </span>
-            </label>
-          </div>
-        </section>
-
-        <section id="existingSubsetPanel" class="workflow-card workflow-card--subset source-panel is-hidden">
-          <div class="workflow-copy">
-            <p class="workflow-eyebrow">Step 1</p>
-            <h2 class="workflow-title">先提供当前子集字体</h2>
-            <p class="workflow-lead">
-              先告诉系统你现在正在使用哪一份子集字体。它会读取已有字符，并尝试自动找回对应的原始全量字体。
-            </p>
-          </div>
-          <label class="field" for="existingSubsetFile">
-            <span class="field-title">当前子集字体</span>
-            <input
-              id="existingSubsetUrl"
-              class="text-input"
-              type="url"
-              inputmode="url"
-              placeholder="可选：填写 http:// 或 https:// 的子集字体地址"
-            />
-            <span class="field-help">
-              如果这里填写了网络地址，系统会优先使用该 URL；留空时才会读取下面上传的本地子集字体。
-            </span>
-            <input
-              id="existingSubsetFile"
-              class="charset-file-input"
-              type="file"
-              accept=".ttf,.otf,.woff,.woff2,.eot,.svg"
-            />
-            <span class="field-help">
-              增量模式下二选一即可。系统会先读取它已有的字符，再和你这次新增的字符做并集。
-            </span>
-          </label>
-          <p id="existingSubsetMeta" class="subset-footnote">还没有选择当前子集字体。</p>
-          <p id="sourceMatchMeta" class="subset-footnote">选择当前子集字体后，会自动匹配曾用于生成它的原始全量字体。</p>
-          <div id="subsetPreviewPanel" class="subset-preview is-hidden" aria-live="polite">
-            <p id="subsetPreviewMeta" class="subset-preview-meta"></p>
-            <div id="subsetPreviewText" class="subset-preview-text" aria-label="当前子集字体字符预览"></div>
-            <div class="subset-preview-actions">
-              <button id="subsetPreviewMore" class="preview-more-button is-hidden" type="button">显示更多字符</button>
-              <button id="subsetPreviewCopy" class="preview-more-button is-hidden" type="button">复制已识别字符</button>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#f5f6f8" />
+  <title>字集 · 字体处理工作台</title>
+  <link rel="stylesheet" href="/theme-refresh.css" />
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="字集首页"><span class="brand-mark">字</span><strong>字集<span>FONT STUDIO</span></strong></a>
+    <span class="topbar-note"><i></i> 字体处理工作台</span>
+  </header>
+  <main class="shell">
+    <aside class="sidebar">
+      <div class="sidebar-intro"><p class="eyebrow">MAKE TYPE LIGHTER</p><h1>好字体，<br />轻一点。</h1><p>留下需要的字符，<br />让每一次加载更轻盈。</p></div>
+      <nav class="step-nav" aria-label="字体处理步骤">
+        <button type="button" data-step-target="0" aria-current="step"><span class="step-number">01</span><span><strong>选择字体</strong><small>上传或复用字体</small></span><span class="step-check"></span></button>
+        <button type="button" data-step-target="1" disabled><span class="step-number">02</span><span><strong>设置字符</strong><small>只保留需要的内容</small></span><span class="step-check"></span></button>
+        <button type="button" data-step-target="2" disabled><span class="step-number">03</span><span><strong>确认导出</strong><small>选择格式并检查</small></span><span class="step-check"></span></button>
+        <button type="button" data-step-target="3" disabled><span class="step-number">04</span><span><strong>查看结果</strong><small>预览与下载</small></span><span class="step-check"></span></button>
+      </nav>
+      <div class="sidebar-tip"><span>小提示</span><p id="stepTip">首次转换后，原始字体会自动保存，下次可以直接复用。</p></div>
+      <p class="sidebar-footer">少一点体积，多一点效率。</p>
+    </aside>
+    <section class="workspace" aria-label="字体工作流">
+      <div class="workspace-top"><span id="stepProgress">步骤 01 / 04</span><span id="workspaceMode">新建字体</span></div>
+      <div class="progress-track" aria-hidden="true"><div id="stepProgressBar"></div></div>
+      <div class="panel">
+        <fieldset id="workflowFields">
+          <section class="wizard-step" data-step="0" aria-label="选择字体">
+            <div class="step-heading"><p class="eyebrow">STEP 01 / SOURCE</p><h2 id="operationTitle" tabindex="-1">从一份字体开始</h2><p id="operationLead">上传完整字体，选择需要的字符，再导出一份更轻的字体。</p></div>
+            <div class="operation-switch" role="radiogroup" aria-label="处理模式">
+              <label class="source-option" for="operationFresh"><input id="operationFresh" type="radio" name="operationMode" value="fresh" checked /><span><strong>新建字体</strong><small>格式转换，或生成一份字符子集</small></span></label>
+              <label class="source-option" for="operationIncremental"><input id="operationIncremental" type="radio" name="operationMode" value="incremental" /><span><strong>增量更新</strong><small>保留已有字符，再补充新内容</small></span></label>
             </div>
-          </div>
-        </section>
-
-        <section id="sourceSetupCard" class="workflow-card workflow-card--source" aria-label="原始全量字体">
-          <div class="workflow-copy">
-            <p id="sourceSectionEyebrow" class="workflow-eyebrow">Step 1</p>
-            <h2 id="sourceSectionTitle" class="workflow-title">选择原始全量字体</h2>
-            <p id="sourceSectionLead" class="workflow-lead">
-              上传一份完整字体，或直接复用服务端已保存的原始字体，作为这次压缩的来源。
-            </p>
-          </div>
-
-          <div class="dropzone" id="dropzone">
-            <input
-              id="fontFile"
-              class="file-input"
-              type="file"
-              accept=".ttf,.otf,.woff,.woff2,.eot,.svg"
-            />
-            <div class="dropzone-copy">
-              <p id="dropzoneTitle" class="dropzone-title">拖入原始全量字体，或点击这里选择</p>
-              <p id="dropzoneHint" class="dropzone-hint">原始字体支持：TTF / OTF / WOFF / WOFF2 / EOT / SVG</p>
-            </div>
-          </div>
-
-          <div class="meta-card">
-            <div class="meta-source-card">
-              <div class="meta-source-head">
-                <p class="meta-label">原始字体</p>
-                <span id="sourceStateBadge" class="source-state-badge">待选择</span>
-              </div>
-              <p id="fileName" class="meta-value">还没有选择文件</p>
-              <p id="sourceStateHint" class="meta-footnote">上传后这里会显示当前生效的原始字体来源。</p>
-              <button id="resetSourceButton" class="meta-action-button" type="button" disabled>
-                重置当前选择
-              </button>
-            </div>
-            <div>
-              <p class="meta-label">输出格式</p>
-              <select id="outputFormat" class="format-select" aria-label="输出格式">
-                <option value="ttf" selected>TTF</option>
-                <option value="woff">WOFF</option>
-                <option value="woff2">WOFF2</option>
-                <option value="eot">EOT</option>
-                <option value="svg">SVG</option>
-              </select>
-            </div>
-            <div>
-              <p class="meta-label">处理方式</p>
-              <p class="meta-value">本地 Node 转换</p>
-            </div>
-          </div>
-
-          <details id="repositoryStoragePanel" class="repository-storage">
-            <summary>
-              <span>GitHub / Gitee 字体仓库</span>
-              <small id="repositoryStorageSummary">正在读取服务端配置</small>
-            </summary>
-            <div class="repository-storage-body">
-              <p id="repositoryStorageMeta" class="subset-footnote">
-                仓库地址和 Token 由服务端环境变量提供，不会发送到浏览器。
-              </p>
-              <div class="repository-storage-actions">
-                <button id="connectRepositoryButton" class="secondary-button" type="button" disabled>使用远程仓库</button>
-                <button id="useLocalStorageButton" class="secondary-button" type="button" disabled>改用本地存储</button>
-              </div>
-            </div>
-          </details>
-
-          <div class="source-library">
-            <label class="field source-library-field" for="sourceFontSelect">
-              <span id="sourceLibraryTitle" class="field-title">已保存原始字体</span>
-              <select id="sourceFontSelect" class="preset-select"></select>
-            </label>
-            <div class="source-library-actions">
-              <button id="useSavedSourceButton" class="secondary-button" type="button" disabled>使用</button>
-              <button id="deleteSavedSourceButton" class="secondary-button" type="button" disabled>移除</button>
-            </div>
-            <div class="source-alias-editor">
-              <label class="field source-alias-field" for="sourceFontAlias">
-                <span class="field-title">字体别名</span>
-                <input
-                  id="sourceFontAlias"
-                  class="text-input"
-                  type="text"
-                  maxlength="80"
-                  placeholder="例如：官网正文字体"
-                  disabled
-                />
-              </label>
-              <button id="saveSourceAliasButton" class="secondary-button" type="button" disabled>保存别名</button>
-            </div>
-            <p id="sourceLibraryMeta" class="subset-footnote">正在读取服务端原始字体列表...</p>
-          </div>
-        </section>
-
-        <section class="options-panel" aria-label="字体瘦身选项">
-          <div class="options-copy">
-            <p id="optionsEyebrow" class="options-eyebrow">Step 2</p>
-            <h2>字体切割与瘦身</h2>
-            <p id="optionsLead">
-              只保留你真正会用到的字符，是缩小输出字体体积最有效的方法。默认还会去掉 hinting 和
-              kerning，进一步减小文件。
-            </p>
-          </div>
-
-          <div class="source-switch" role="radiogroup" aria-label="字符集来源">
-            <label class="source-option" for="modeFull">
-              <input id="modeFull" type="radio" name="subsetMode" value="full" />
-              <span>
-                <strong>完整字体</strong>
-                <small>不做字符切割，只保留原字体全部字形</small>
-              </span>
-            </label>
-
-            <label class="source-option" for="modePreset">
-              <input id="modePreset" type="radio" name="subsetMode" value="preset" />
-              <span>
-                <strong>系统预设</strong>
-                <small>直接选择常用 3500 字或扩展 6500 字预设</small>
-              </span>
-            </label>
-
-            <label class="source-option" for="modeManual">
-              <input id="modeManual" type="radio" name="subsetMode" value="manual" checked />
-              <span>
-                <strong>手动输入</strong>
-                <small>自己输入需要保留的字符，适合按项目文案裁剪</small>
-              </span>
-            </label>
-
-            <label class="source-option" for="modeFile">
-              <input id="modeFile" type="radio" name="subsetMode" value="file" />
-              <span>
-                <strong>上传字符集文件</strong>
-                <small>从文本文件读取字符集，适合批量压缩或复用字集</small>
-              </span>
-            </label>
-          </div>
-
-          <div id="presetPanel" class="source-panel is-hidden">
-            <label class="field" for="presetSelect">
-              <span class="field-title">系统预设字集</span>
-              <select id="presetSelect" class="preset-select"></select>
-              <span id="presetDescription" class="field-help">正在加载系统预设...</span>
-            </label>
-          </div>
-
-          <div id="manualPanel" class="source-panel">
-            <label class="field" for="subsetText">
-              <span class="field-title">保留字符</span>
-              <textarea
-                id="subsetText"
-                class="subset-input"
-                rows="5"
-                placeholder="例如：0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz首页按钮菜单中文标题"
-              ></textarea>
-              <span class="field-help">
-                输入内容后，仅保留这些字符对应的字形；换行只作为分隔，不会写进字体。
-              </span>
-            </label>
-          </div>
-
-          <div id="filePanel" class="source-panel is-hidden">
-            <label class="field" for="charsetFile">
-              <span class="field-title">上传字符集文件</span>
-              <input
-                id="charsetFile"
-                class="charset-file-input"
-                type="file"
-                accept=".txt,.text,.md,.csv,.json"
-              />
-              <span class="field-help">
-                文件里的所有可见字符都会参与子集化；常见做法是准备一份项目文案文本。
-              </span>
-            </label>
-            <p id="charsetFileMeta" class="subset-footnote">还没有选择字符集文件。</p>
-          </div>
-
-          <div class="toggle-grid">
-            <label class="toggle-card" for="keepHinting">
-              <input id="keepHinting" type="checkbox" />
-              <span>
-                <strong>保留 hinting</strong>
-                <small>显示更稳，但输出文件会更大</small>
-              </span>
-            </label>
-
-            <label class="toggle-card" for="keepKerning">
-              <input id="keepKerning" type="checkbox" />
-              <span>
-                <strong>保留 kerning</strong>
-                <small>字距信息更完整，但输出文件会更大</small>
-              </span>
-            </label>
-          </div>
-
-          <p id="subsetSummary" class="subset-summary">当前选择手动输入，但还没有填写要保留的字符。</p>
-          <p id="subsetFootnote" class="subset-footnote">
-            提醒：很多 OTF 本身并不包含可保留的 hinting 或 kerning 表，这种情况下勾选它们不会改变体积。增量更新时先提供当前子集字体来源（网络地址或本地文件），系统会自动匹配原始全量字体；匹配不到时再在上方手动上传原始全量字体。
-          </p>
-        </section>
-
-        <section class="delivery-panel" aria-label="交付设置">
-          <details id="cdnConfigPanel" class="cdn-config-panel">
-            <summary>
-              <span>CDN 上传配置</span>
-              <small id="cdnConfigSummary">正在读取服务端默认配置</small>
-            </summary>
-            <div class="cdn-config-body">
-              <div class="cdn-config-grid">
-                <label class="field" for="cdnConfigLabel">
-                  <span class="field-title">显示名称</span>
-                  <input id="cdnConfigLabel" class="text-input" type="text" value="qll-times CDN" />
-                </label>
-                <label class="field cdn-config-wide" for="cdnConfigUploadUrl">
-                  <span class="field-title">上传接口</span>
-                  <input
-                    id="cdnConfigUploadUrl"
-                    class="text-input"
-                    type="text"
-                    value="https://bt.qll-times.com/api/upload/file"
-                    spellcheck="false"
-                  />
-                  <span class="field-help">固定使用 POST multipart/form-data 上传。</span>
-                </label>
-                <label class="field cdn-config-wide" for="cdnConfigFilename">
-                  <span class="field-title">远端文件名模板</span>
-                  <input
-                    id="cdnConfigFilename"
-                    class="text-input"
-                    type="text"
-                    value="/temp/{{dateCompact}}/{{uuid}}.{{ext}}"
-                    spellcheck="false"
-                  />
-                  <span class="field-help">表单字段固定为 file（二进制）和 filename（此处生成的路径）。</span>
-                </label>
-              </div>
-              <div class="cdn-config-actions">
-                <button id="applyCdnConfigButton" class="secondary-button" type="button">应用页面配置</button>
-                <button id="useServerCdnConfigButton" class="secondary-button" type="button">恢复服务端默认</button>
-              </div>
-              <p id="cdnConfigMeta" class="subset-footnote">
-                上传成功后自动读取响应 JSON 的 data.url 作为最终访问地址。
-              </p>
-            </div>
-          </details>
-
-          <label id="cdnUploadCard" class="toggle-card delivery-toggle is-disabled" for="uploadToCdn">
-            <input id="uploadToCdn" type="checkbox" disabled />
-            <span>
-              <strong>压缩完成后自动上传 CDN</strong>
-              <small id="cdnUploadHelp">服务端未配置 CDN 上传，当前只会直接下载结果文件。</small>
-            </span>
-          </label>
-          <section id="cdnFilenameModePanel" class="delivery-mode-panel is-hidden" aria-live="polite">
-            <div class="delivery-mode-copy">
-              <p class="delivery-mode-title">CDN 文件名策略</p>
-              <p id="cdnFilenameModeLead" class="delivery-mode-lead">
-                当前子集字体来自网络地址时，你可以选择覆盖原 CDN 文件，或生成一个新的随机地址。
-              </p>
-            </div>
-            <div class="delivery-mode-options">
-              <label class="source-option delivery-option" for="cdnFilenameModeExisting">
-                <input
-                  id="cdnFilenameModeExisting"
-                  type="radio"
-                  name="cdnFilenameMode"
-                  value="existing"
-                  checked
-                />
-                <span>
-                  <strong>沿用当前 URL 文件名</strong>
-                  <small>适合直接覆盖同一个 CDN 文件；如果当前输出格式不同，会沿用原路径并自动替换扩展名。</small>
-                </span>
-              </label>
-              <label class="source-option delivery-option" for="cdnFilenameModeTemplate">
-                <input
-                  id="cdnFilenameModeTemplate"
-                  type="radio"
-                  name="cdnFilenameMode"
-                  value="template"
-                />
-                <span>
-                  <strong>生成新的随机文件名</strong>
-                  <small>继续按当前 CDN 文件名模板生成，适合保留旧版本并产出新地址。</small>
-                </span>
-              </label>
-            </div>
+            <section id="existingSubsetPanel" class="inset-card source-panel is-hidden">
+              <div class="section-heading"><h3>当前使用的子集字体</h3><p>提供本地文件或网络地址，自动查找对应的原始字体。</p></div>
+              <label class="field" for="existingSubsetFile"><span class="field-title">本地子集文件</span><input id="existingSubsetFile" class="charset-file-input" type="file" accept=".ttf,.otf,.woff,.woff2,.eot,.svg" /></label>
+              <label class="field" for="existingSubsetUrl"><span class="field-title">或使用网络地址</span><input id="existingSubsetUrl" class="text-input" type="url" inputmode="url" placeholder="https://example.com/font.woff2" /><span class="field-help">填写地址时优先读取网络字体；清空地址后使用本地文件。</span></label>
+              <p id="existingSubsetMeta" class="subset-footnote">还没有选择当前子集字体。</p>
+              <p id="sourceMatchMeta" class="subset-footnote">选择后自动匹配原始全量字体。</p>
+              <details class="preview-disclosure"><summary>查看已有字符</summary><div id="subsetPreviewPanel" class="subset-preview is-hidden" aria-live="polite"><p id="subsetPreviewMeta" class="subset-preview-meta"></p><div id="subsetPreviewText" class="subset-preview-text" aria-label="当前子集字体字符预览"></div><div class="subset-preview-actions"><button id="subsetPreviewMore" class="preview-more-button is-hidden" type="button">显示更多字符</button><button id="subsetPreviewCopy" class="preview-more-button is-hidden" type="button">复制已识别字符</button></div></div></details>
+            </section>
+            <section id="sourceSetupCard" class="workflow-card--source">
+              <div class="section-heading"><p id="sourceSectionEyebrow" class="sr-only">原始字体</p><h3 id="sourceSectionTitle">选择原始全量字体</h3><p id="sourceSectionLead">拖入本地字体，或复用已经保存的字体。</p></div>
+              <div class="dropzone" id="dropzone"><input id="fontFile" class="file-input" aria-label="选择原始全量字体文件" type="file" accept=".ttf,.otf,.woff,.woff2,.eot,.svg" /><div class="dropzone-copy"><span class="upload-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 16V4m-4 4 4-4 4 4M5 15v5h14v-5" /></svg></span><p id="dropzoneTitle" class="dropzone-title">拖入原始全量字体，或点击这里选择</p><p id="dropzoneHint" class="dropzone-hint">TTF / OTF / WOFF / WOFF2 / EOT / SVG · 最大 60 MB</p></div></div>
+              <div class="meta-source-card"><div class="meta-source-head"><span id="sourceStateBadge" class="source-state-badge">待选择</span><button id="resetSourceButton" class="meta-action-button" type="button" disabled>重置选择</button></div><p id="fileName" class="meta-value">还没有选择文件</p><p id="sourceStateHint" class="meta-footnote">选择后会自动检查字体。</p></div>
+              <details class="library-disclosure"><summary><span>从字体库中选择</span><small>复用 · 管理 · 仓库存储</small></summary><div class="source-library">
+                <div class="library-row"><label class="field source-library-field" for="sourceFontSelect"><span id="sourceLibraryTitle" class="field-title">已保存原始字体</span><select id="sourceFontSelect" class="preset-select"></select></label><div class="source-library-actions"><button id="useSavedSourceButton" class="secondary-button" type="button" disabled>使用字体</button><button id="deleteSavedSourceButton" class="text-button danger" type="button" disabled>移除</button></div></div>
+                <details class="alias-disclosure"><summary>编辑字体别名</summary><div class="source-alias-editor"><label class="field source-alias-field" for="sourceFontAlias"><span class="sr-only">字体别名</span><input id="sourceFontAlias" class="text-input" type="text" maxlength="80" placeholder="例如：官网正文字体" disabled /></label><button id="saveSourceAliasButton" class="secondary-button" type="button" disabled>保存别名</button></div></details>
+                <p id="sourceLibraryMeta" class="subset-footnote">正在读取字体库…</p>
+                <details id="repositoryStoragePanel" class="repository-storage"><summary><span>GitHub / Gitee 字体仓库</span><small id="repositoryStorageSummary">正在读取配置</small></summary><div class="repository-storage-body"><p id="repositoryStorageMeta" class="subset-footnote"></p><div class="repository-storage-actions"><button id="connectRepositoryButton" class="secondary-button" type="button" disabled>使用远程仓库</button><button id="useLocalStorageButton" class="secondary-button" type="button" disabled>改用本地存储</button></div></div></details>
+              </div></details>
+            </section>
           </section>
-          <div id="cdnUploadResult" class="delivery-result is-hidden" aria-live="polite"></div>
-        </section>
-
-        <section id="preflightPanel" class="preflight-panel" aria-live="polite">
-          <div class="preflight-head">
-            <div>
-              <p class="preflight-eyebrow">Before Convert</p>
-              <h2 class="preflight-title">转换前检查</h2>
+          <section class="wizard-step is-hidden" data-step="1" aria-label="设置字符">
+            <div class="step-heading"><p id="optionsEyebrow" class="eyebrow">STEP 02 / CHARACTERS</p><h2 tabindex="-1">留下真正需要的字符</h2><p id="optionsLead">把项目文案粘贴进来，我们会自动去重。字符越精简，字体越轻。</p></div>
+            <div class="source-switch" role="radiogroup" aria-label="字符集来源">
+              <label class="source-option" for="modeManual"><input id="modeManual" type="radio" name="subsetMode" value="manual" checked /><span><strong>输入文案</strong><small>按页面实际内容裁剪</small></span></label>
+              <label class="source-option" for="modePreset"><input id="modePreset" type="radio" name="subsetMode" value="preset" /><span><strong>系统字集</strong><small>常用 3500 / 扩展 6500 字</small></span></label>
+              <label class="source-option" for="modeFile"><input id="modeFile" type="radio" name="subsetMode" value="file" /><span><strong>文案文件</strong><small>导入项目文本内容</small></span></label>
+              <label class="source-option" for="modeFull"><input id="modeFull" type="radio" name="subsetMode" value="full" /><span><strong id="fullModeTitle">保留全部</strong><small id="fullModeHelp">仅转换格式，不裁剪字符</small></span></label>
             </div>
-            <span id="preflightBadge" class="preflight-badge">待补齐</span>
-          </div>
-          <p id="preflightSummary" class="preflight-summary">先补齐必需项，按钮才会解锁。</p>
-          <ul id="preflightChecklist" class="preflight-checklist"></ul>
-          <div id="preflightFeatureNotes" class="preflight-feature-notes is-hidden"></div>
-        </section>
-
-        <div class="actions">
-          <button id="convertButton" class="primary-button" disabled>转换并下载 TTF</button>
-          <p id="status" class="status">请选择一个字体文件开始。</p>
-        </div>
-
-        <section id="outputPreviewPanel" class="subset-preview output-preview is-hidden" aria-live="polite">
-          <p id="outputPreviewMeta" class="subset-preview-meta"></p>
-          <div id="outputPreviewText" class="subset-preview-text" aria-label="压缩完成字体字符预览"></div>
-          <div class="subset-preview-actions">
-            <button id="outputPreviewMore" class="preview-more-button is-hidden" type="button">显示更多字符</button>
-            <button id="outputPreviewCopy" class="preview-more-button is-hidden" type="button">复制已识别字符</button>
-          </div>
-        </section>
-      </section>
-    </main>
-
-    <script type="module" src="/app.js"></script>
-  </body>
+            <div id="manualPanel" class="source-panel"><label class="field" for="subsetText"><span class="field-title" id="characterInputLabel">需要保留的文案</span><textarea id="subsetText" class="subset-input" rows="8" placeholder="在这里粘贴标题、正文、按钮等文案…"></textarea><span class="field-help">重复字符会自动合并，换行仅作为分隔。记得加入数字和标点。</span></label><div class="quick-actions"><span>快速补充</span><button type="button" class="chip-button" data-characters="0123456789">数字 0–9</button><button type="button" class="chip-button" data-characters="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz">英文字母</button><button type="button" class="chip-button" data-characters="，。！？：；、（）《》“”‘’…—.,!?;:()-">常用标点</button></div></div>
+            <div id="presetPanel" class="source-panel inset-card is-hidden"><label class="field" for="presetSelect"><span class="field-title">系统预设字集</span><select id="presetSelect" class="preset-select"></select><span id="presetDescription" class="field-help">正在加载系统预设…</span></label></div>
+            <div id="filePanel" class="source-panel inset-card is-hidden"><label class="field" for="charsetFile"><span class="field-title">选择文案文件</span><input id="charsetFile" class="charset-file-input" type="file" accept=".txt,.text,.md,.csv,.json" /><span class="field-help">支持 TXT、Markdown、CSV、JSON；文件中的所有可见字符都会参与裁剪。</span></label><p id="charsetFileMeta" class="subset-footnote">还没有选择字符集文件。</p></div>
+            <p id="subsetSummary" class="subset-summary" aria-live="polite">输入文案后显示字符统计。</p>
+          </section>
+          <section class="wizard-step is-hidden" data-step="2" aria-label="确认导出">
+            <div class="step-heading"><p class="eyebrow">STEP 03 / EXPORT</p><h2 tabindex="-1">准备好，让字体轻下来</h2><p>确认输出格式和处理内容，剩下的交给我们。</p></div>
+            <div class="export-format"><label class="field" for="outputFormat"><span class="field-title">输出格式</span><select id="outputFormat" class="format-select"><option value="woff2" selected>WOFF2 · 网页推荐</option><option value="woff">WOFF · 网页兼容</option><option value="ttf">TTF · 通用字体</option><option value="eot">EOT · 旧版浏览器</option><option value="svg">SVG · 字体文件</option></select></label><p class="field-help">网页使用优先选择 WOFF2；桌面安装或通用场景选择 TTF。</p></div>
+            <dl class="review-summary"><div><dt>原始字体</dt><dd id="reviewSource">尚未选择</dd><button class="text-button" type="button" data-edit-step="0">修改</button></div><div><dt>字符范围</dt><dd id="reviewCharacters"></dd><button class="text-button" type="button" data-edit-step="1">修改</button></div></dl>
+            <details class="advanced-options"><summary><span>高级优化选项</span><small>默认移除额外信息，减小体积</small></summary><div class="advanced-body"><div class="toggle-grid"><label class="toggle-card" for="keepHinting"><input id="keepHinting" type="checkbox" /><span><strong>保留 hinting</strong><small>保留小字号显示微调信息</small></span></label><label class="toggle-card" for="keepKerning"><input id="keepKerning" type="checkbox" /><span><strong>保留 kerning</strong><small>保留字符间距信息</small></span></label></div><p id="subsetFootnote" class="subset-footnote"></p></div></details>
+            <section id="preflightPanel" class="preflight-panel" aria-live="polite"><div class="preflight-head"><h3>转换前检查</h3><span id="preflightBadge" class="preflight-badge">待补齐</span></div><p id="preflightSummary" class="preflight-summary"></p><ul id="preflightChecklist" class="preflight-checklist"></ul><details class="feature-details"><summary>查看字体技术信息</summary><div id="preflightFeatureNotes" class="preflight-feature-notes is-hidden"></div></details></section>
+          </section>
+          <section class="wizard-step is-hidden" data-step="3" aria-label="查看结果">
+            <div class="step-heading"><p class="eyebrow">STEP 04 / READY</p><h2 tabindex="-1">你的字体，已准备就绪</h2><p id="resultFilename">转换后即可下载文件。</p></div>
+            <div class="result-hero"><span class="result-icon" aria-hidden="true">✓</span><div><span class="result-label">输出文件大小</span><strong id="resultSize">—</strong><span id="resultSaving"></span></div><a id="downloadResult" class="primary-button" download>下载字体 <span aria-hidden="true">↓</span></a></div>
+            <div class="result-stats"><div><span>原始大小</span><strong id="resultOriginalSize">—</strong></div><div><span>处理字符</span><strong id="resultCharacterCount">—</strong></div><div><span>输出格式</span><strong id="resultFormat">—</strong></div></div>
+            <section id="outputPreviewPanel" class="subset-preview output-preview is-hidden" aria-live="polite"><div class="section-heading"><h3>字符预览</h3><p>检查实际输出；缺失字符会单独标记。</p></div><p id="outputPreviewMeta" class="subset-preview-meta"></p><div id="outputPreviewText" class="subset-preview-text" aria-label="输出字体字符预览"></div><div class="subset-preview-actions"><button id="outputPreviewMore" class="preview-more-button is-hidden" type="button">显示更多字符</button><button id="outputPreviewCopy" class="preview-more-button is-hidden" type="button">复制已识别字符</button></div></section>
+            <p class="result-footnote">原始字体和匹配记录已保存，可在字体库中继续复用。</p>
+          </section>
+        </fieldset>
+        <div id="busyIndicator" class="busy-indicator is-hidden" role="status"><span class="spinner"></span><span>正在处理字体，请稍候…</span></div>
+        <p id="status" class="status" role="status" aria-live="polite">请选择一个字体文件开始。</p>
+        <footer class="workflow-footer"><button id="previousStep" class="secondary-button is-hidden" type="button">← 上一步</button><p id="stepHint">选择一份原始字体后继续。</p><button id="nextStep" class="primary-button" type="button" disabled>下一步：设置字符 →</button><button id="convertButton" class="primary-button is-hidden" type="button" disabled>生成 WOFF2 字体</button><button id="restartWorkflow" class="secondary-button is-hidden" type="button">处理另一份字体</button></footer>
+      </div>
+    </section>
+  </main>
+  <script type="module" src="/app.js"></script>
+</body>
 </html>
