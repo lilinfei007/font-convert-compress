@@ -21,7 +21,7 @@
         <button type="button" data-step-target="2" disabled><span class="step-number">03</span><span><strong>确认导出</strong><small>选择格式并检查</small></span><span class="step-check"></span></button>
         <button type="button" data-step-target="3" disabled><span class="step-number">04</span><span><strong>查看结果</strong><small>预览与下载</small></span><span class="step-check"></span></button>
       </nav>
-      <div class="sidebar-tip"><span>小提示</span><p id="stepTip">首次转换后，原始字体会自动保存，下次可以直接复用。</p></div>
+      <div class="sidebar-tip"><span>小提示</span><p id="stepTip">上传原始全量字体，选择需要保留的字符。</p></div>
       <p class="sidebar-footer">少一点体积，多一点效率。</p>
     </aside>
     <section class="workspace" aria-label="字体工作流">
@@ -36,22 +36,21 @@
               <label class="source-option" for="operationIncremental"><input id="operationIncremental" type="radio" name="operationMode" value="incremental" /><span><strong>增量更新</strong><small>保留已有字符，再补充新内容</small></span></label>
             </div>
             <section id="existingSubsetPanel" class="inset-card source-panel is-hidden">
-              <div class="section-heading"><h3>当前使用的子集字体</h3><p>提供本地文件或网络地址，自动查找对应的原始字体。</p></div>
+              <div class="section-heading"><h3>当前使用的子集字体</h3><p>提供本地文件或网络地址，再确认对应的原始全量字体。</p></div>
               <label class="field" for="existingSubsetFile"><span class="field-title">本地子集文件</span><input id="existingSubsetFile" class="charset-file-input" type="file" accept=".ttf,.otf,.woff,.woff2,.eot,.svg" /></label>
               <label class="field" for="existingSubsetUrl"><span class="field-title">或使用网络地址</span><input id="existingSubsetUrl" class="text-input" type="url" inputmode="url" placeholder="https://example.com/font.woff2" /><span class="field-help">填写地址时优先读取网络字体；清空地址后使用本地文件。</span></label>
               <p id="existingSubsetMeta" class="subset-footnote">还没有选择当前子集字体。</p>
-              <p id="sourceMatchMeta" class="subset-footnote">选择后自动匹配原始全量字体。</p>
+              <p id="sourceMatchMeta" class="subset-footnote">增量更新需要对应的原始全量字体。</p>
               <details class="preview-disclosure"><summary>查看已有字符</summary><div id="subsetPreviewPanel" class="subset-preview is-hidden" aria-live="polite"><p id="subsetPreviewMeta" class="subset-preview-meta"></p><div id="subsetPreviewText" class="subset-preview-text" aria-label="当前子集字体字符预览"></div><div class="subset-preview-actions"><button id="subsetPreviewMore" class="preview-more-button is-hidden" type="button">显示更多字符</button><button id="subsetPreviewCopy" class="preview-more-button is-hidden" type="button">复制已识别字符</button></div></div></details>
             </section>
             <section id="sourceSetupCard" class="workflow-card--source">
-              <div class="section-heading"><p id="sourceSectionEyebrow" class="sr-only">原始字体</p><h3 id="sourceSectionTitle">选择原始全量字体</h3><p id="sourceSectionLead">拖入本地字体，或复用已经保存的字体。</p></div>
-              <div class="dropzone" id="dropzone"><input id="fontFile" class="file-input" aria-label="选择原始全量字体文件" type="file" accept=".ttf,.otf,.woff,.woff2,.eot,.svg" /><div class="dropzone-copy"><span class="upload-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 16V4m-4 4 4-4 4 4M5 15v5h14v-5" /></svg></span><p id="dropzoneTitle" class="dropzone-title">拖入原始全量字体，或点击这里选择</p><p id="dropzoneHint" class="dropzone-hint">TTF / OTF / WOFF / WOFF2 / EOT / SVG · 最大 60 MB</p></div></div>
+              <div class="section-heading"><p id="sourceSectionEyebrow" class="sr-only">原始字体</p><h3 id="sourceSectionTitle">选择原始全量字体</h3><p id="sourceSectionLead">拖入本地原始全量字体，作为这次处理的来源。</p></div>
+              <div class="dropzone" id="dropzone"><input id="fontFile" class="file-input" aria-label="选择原始全量字体文件" type="file" accept=".ttf,.otf,.woff,.woff2,.eot,.svg" /><div class="dropzone-copy"><span class="upload-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 16V4m-4 4 4-4 4 4M5 15v5h14v-5" /></svg></span><p id="dropzoneTitle" class="dropzone-title">拖入原始全量字体，或点击这里选择</p><p id="dropzoneHint" class="dropzone-hint">TTF / OTF / WOFF / WOFF2 / EOT / SVG · 最大 16 MB</p></div></div>
               <div class="meta-source-card"><div class="meta-source-head"><span id="sourceStateBadge" class="source-state-badge">待选择</span><button id="resetSourceButton" class="meta-action-button" type="button" disabled>重置选择</button></div><p id="fileName" class="meta-value">还没有选择文件</p><p id="sourceStateHint" class="meta-footnote">选择后会自动检查字体。</p></div>
-              <details class="library-disclosure"><summary><span>从字体库中选择</span><small>复用 · 管理 · 仓库存储</small></summary><div class="source-library">
+              <details class="library-disclosure"><summary><span>从字体库中选择</span><small>复用 · 管理</small></summary><div class="source-library">
                 <div class="library-row"><label class="field source-library-field" for="sourceFontSelect"><span id="sourceLibraryTitle" class="field-title">已保存原始字体</span><select id="sourceFontSelect" class="preset-select"></select></label><div class="source-library-actions"><button id="useSavedSourceButton" class="secondary-button" type="button" disabled>使用字体</button><button id="deleteSavedSourceButton" class="text-button danger" type="button" disabled>移除</button></div></div>
                 <details class="alias-disclosure"><summary>编辑字体别名</summary><div class="source-alias-editor"><label class="field source-alias-field" for="sourceFontAlias"><span class="sr-only">字体别名</span><input id="sourceFontAlias" class="text-input" type="text" maxlength="80" placeholder="例如：官网正文字体" disabled /></label><button id="saveSourceAliasButton" class="secondary-button" type="button" disabled>保存别名</button></div></details>
                 <p id="sourceLibraryMeta" class="subset-footnote">正在读取字体库…</p>
-                <details id="repositoryStoragePanel" class="repository-storage"><summary><span>GitHub / Gitee 字体仓库</span><small id="repositoryStorageSummary">正在读取配置</small></summary><div class="repository-storage-body"><p id="repositoryStorageMeta" class="subset-footnote"></p><div class="repository-storage-actions"><button id="connectRepositoryButton" class="secondary-button" type="button" disabled>使用远程仓库</button><button id="useLocalStorageButton" class="secondary-button" type="button" disabled>改用本地存储</button></div></div></details>
               </div></details>
             </section>
           </section>
@@ -80,7 +79,7 @@
             <div class="result-hero"><span class="result-icon" aria-hidden="true">✓</span><div><span class="result-label">输出文件大小</span><strong id="resultSize">—</strong><span id="resultSaving"></span></div><a id="downloadResult" class="primary-button" download>下载字体 <span aria-hidden="true">↓</span></a></div>
             <div class="result-stats"><div><span>原始大小</span><strong id="resultOriginalSize">—</strong></div><div><span>处理字符</span><strong id="resultCharacterCount">—</strong></div><div><span>输出格式</span><strong id="resultFormat">—</strong></div></div>
             <section id="outputPreviewPanel" class="subset-preview output-preview is-hidden" aria-live="polite"><div class="section-heading"><h3>字符预览</h3><p>检查实际输出；缺失字符会单独标记。</p></div><p id="outputPreviewMeta" class="subset-preview-meta"></p><div id="outputPreviewText" class="subset-preview-text" aria-label="输出字体字符预览"></div><div class="subset-preview-actions"><button id="outputPreviewMore" class="preview-more-button is-hidden" type="button">显示更多字符</button><button id="outputPreviewCopy" class="preview-more-button is-hidden" type="button">复制已识别字符</button></div></section>
-            <p class="result-footnote">原始字体和匹配记录已保存，可在字体库中继续复用。</p>
+            <p id="resultFootnote" class="result-footnote">转换完成后请下载字体文件。</p>
           </section>
         </fieldset>
         <div id="busyIndicator" class="busy-indicator is-hidden" role="status"><span class="spinner"></span><span>正在处理字体，请稍候…</span></div>

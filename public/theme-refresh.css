@@ -103,9 +103,7 @@ summary small { font-size: 10px; font-weight: 400; color: #9299a6; margin-left: 
 .source-library, .advanced-body { border-top: 1px solid var(--line); padding: 18px; display: flex; flex-direction: column; gap: 18px; }
 .library-row { display: flex; align-items: flex-end; gap: 12px; }
 .source-library-field, .source-alias-field { flex: 1; min-width: 0; }
-.source-library-actions, .repository-storage-actions, .subset-preview-actions, .source-alias-editor { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.repository-storage { border-top: 1px solid var(--line); padding-top: 15px; }
-.repository-storage-body { padding-top: 16px; display: grid; gap: 14px; }
+.source-library-actions, .subset-preview-actions, .source-alias-editor { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .alias-disclosure .source-alias-editor { padding-top: 10px; }
 .field { display: flex; flex-direction: column; gap: 8px; }
 .field-title { font-size: 12px; font-weight: 600; }

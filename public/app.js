@@ -30,11 +30,6 @@ const deleteSavedSourceButton = document.querySelector('#deleteSavedSourceButton
 const sourceFontAlias = document.querySelector('#sourceFontAlias');
 const saveSourceAliasButton = document.querySelector('#saveSourceAliasButton');
 const sourceLibraryMeta = document.querySelector('#sourceLibraryMeta');
-const repositoryStoragePanel = document.querySelector('#repositoryStoragePanel');
-const repositoryStorageSummary = document.querySelector('#repositoryStorageSummary');
-const connectRepositoryButton = document.querySelector('#connectRepositoryButton');
-const useLocalStorageButton = document.querySelector('#useLocalStorageButton');
-const repositoryStorageMeta = document.querySelector('#repositoryStorageMeta');
 const convertButton = document.querySelector('#convertButton');
 const status = document.querySelector('#status');
 const dropzone = document.querySelector('#dropzone');
@@ -65,6 +60,7 @@ const outputPreviewMeta = document.querySelector('#outputPreviewMeta');
 const outputPreviewText = document.querySelector('#outputPreviewText');
 const outputPreviewMore = document.querySelector('#outputPreviewMore');
 const outputPreviewCopy = document.querySelector('#outputPreviewCopy');
+const resultFootnote = document.querySelector('#resultFootnote');
 const subsetModeInputs = Array.from(document.querySelectorAll('input[name="subsetMode"]'));
 const operationModeInputs = Array.from(document.querySelectorAll('input[name="operationMode"]'));
 
@@ -92,7 +88,7 @@ const FONT_FORMAT_HINTS = {
   svg: 'svg'
 };
 const PREVIEW_BATCH_SIZE = 600;
-const REPOSITORY_STORAGE_SESSION_KEY = 'font-converter-repository-storage';
+let maxFontBytes = 16 * 1024 * 1024;
 
 let selectedFile = null;
 let charsetPresets = [];
@@ -122,11 +118,10 @@ let subsetPreviewTimer = 0;
 let subsetPreviewTargetKey = '';
 let subsetPreviewStyle = null;
 let outputPreviewStyle = null;
-let repositoryStorageState = {
-  enabled: true,
-  available: false,
-  path: 'font-data',
-  displayName: ''
+let storageState = {
+  loaded: false,
+  r2Available: false,
+  error: ''
 };
 let sourceInspectionState = {
   key: '',
@@ -196,68 +191,41 @@ function updateStatus(message, tone = 'default') {
 function apiFetch(resource, options = {}) {
   const headers = new Headers(options.headers || {});
 
-  if (repositoryStorageState.available) {
-    headers.set('X-Font-Storage-Mode', repositoryStorageState.enabled ? 'remote' : 'local');
+  if (storageState.loaded) {
+    headers.set('X-Font-Storage-Mode', getActiveStorageMode());
   }
 
   return window.fetch(resource, { ...options, headers });
 }
 
-function persistRepositoryStorageState() {
-  sessionStorage.setItem(
-    REPOSITORY_STORAGE_SESSION_KEY,
-    JSON.stringify({ enabled: repositoryStorageState.enabled })
-  );
+function getActiveStorageMode() {
+  return storageState.r2Available ? 'r2' : 'none';
 }
 
-function restoreRepositoryStorageState() {
-  try {
-    const stored = JSON.parse(sessionStorage.getItem(REPOSITORY_STORAGE_SESSION_KEY) || 'null');
-    repositoryStorageState.enabled = stored?.enabled !== false;
-    persistRepositoryStorageState();
-  } catch {
-    sessionStorage.removeItem(REPOSITORY_STORAGE_SESSION_KEY);
-  }
+function hasPersistentStorage() {
+  return getActiveStorageMode() !== 'none';
 }
 
-function renderRepositoryStorageState() {
-  connectRepositoryButton.disabled = !repositoryStorageState.available || repositoryStorageState.enabled;
-  useLocalStorageButton.disabled = !repositoryStorageState.available || !repositoryStorageState.enabled;
-
-  if (!repositoryStorageState.available) {
-    repositoryStorageSummary.textContent = '服务端未配置远程仓库';
-    repositoryStorageMeta.textContent =
-      '请在服务端环境变量中配置 FONT_REPOSITORY_URL、FONT_REPOSITORY_TOKEN、FONT_REPOSITORY_BRANCH 和 FONT_REPOSITORY_PATH。';
-    return;
-  }
-
-  if (repositoryStorageState.enabled) {
-    repositoryStorageSummary.textContent = `正在使用 ${repositoryStorageState.displayName}`;
-    repositoryStorageMeta.textContent = `字体操作将使用服务端配置的 ${repositoryStorageState.displayName} 仓库，数据目录为 ${repositoryStorageState.path}/；Token 不会发送到浏览器。`;
-    return;
-  }
-
-  repositoryStorageSummary.textContent = `当前使用本地存储（远程：${repositoryStorageState.displayName}）`;
-  repositoryStorageMeta.textContent = '远程仓库配置仍保留在服务端；点击“使用远程仓库”即可切回。';
+function getDefaultSourceMatchMessage() {
+  return hasPersistentStorage()
+    ? '选择当前子集字体后，会自动匹配曾用于生成它的原始全量字体。'
+    : '当前仅转换、不保存匹配记录。增量更新时，请同时提供当前子集和原始全量字体。';
 }
 
 function applyRuntimeConfig(payload) {
-  const repositoryConfig =
-    payload?.repositoryStorage && typeof payload.repositoryStorage === 'object'
-      ? payload.repositoryStorage
-      : {};
-
-  repositoryStorageState = {
-    ...repositoryStorageState,
-    available: Boolean(repositoryConfig.available),
-    enabled: Boolean(repositoryConfig.available && repositoryStorageState.enabled),
-    path: typeof repositoryConfig.path === 'string' && repositoryConfig.path ? repositoryConfig.path : 'font-data',
-    displayName:
-      typeof repositoryConfig.displayName === 'string' && repositoryConfig.displayName
-        ? repositoryConfig.displayName
-        : '远程字体仓库'
+  if (Number.isSafeInteger(payload?.maxFontBytes) && payload.maxFontBytes > 0) {
+    maxFontBytes = payload.maxFontBytes;
+    document.querySelector('#dropzoneHint').textContent =
+      `TTF / OTF / WOFF / WOFF2 / EOT / SVG · 最大 ${formatBytes(maxFontBytes)}`;
+  }
+  storageState = {
+    loaded: true,
+    r2Available: Boolean(payload?.r2Storage?.available),
+    error: ''
   };
-  renderRepositoryStorageState();
+  sourceMatchMeta.textContent = getDefaultSourceMatchMessage();
+  updateSourceFontMeta();
+  updateConvertButtonState();
 }
 
 async function loadRuntimeConfig() {
@@ -270,8 +238,14 @@ async function loadRuntimeConfig() {
     const payload = await response.json();
     applyRuntimeConfig(payload);
   } catch (error) {
-    repositoryStorageState = { ...repositoryStorageState, available: false, enabled: false };
-    renderRepositoryStorageState();
+    storageState = {
+      loaded: true,
+      r2Available: false,
+      error: '存储配置读取失败，本次按仅转换模式处理，不保存原始字体和匹配记录。刷新页面可重试。'
+    };
+    sourceMatchMeta.textContent = getDefaultSourceMatchMessage();
+    updateSourceFontMeta();
+    updateConvertButtonState();
   }
 }
 
@@ -460,7 +434,7 @@ function hasExistingSubsetSource() {
 }
 
 function hasExplicitSourceSelection() {
-  return Boolean(selectedFile || selectedLibrarySource?.sourceHash);
+  return Boolean(selectedFile || (hasPersistentStorage() && selectedLibrarySource?.sourceHash));
 }
 
 function hasSourceFontForCurrentOperation() {
@@ -468,7 +442,7 @@ function hasSourceFontForCurrentOperation() {
     return hasExplicitSourceSelection();
   }
 
-  return Boolean(hasExplicitSourceSelection() || matchedSourceState?.sourceHash);
+  return Boolean(hasExplicitSourceSelection() || (hasPersistentStorage() && matchedSourceState?.sourceHash));
 }
 
 function isMatchingCachedFileState(fileState, file) {
@@ -573,7 +547,7 @@ function getCurrentSourceInspectionTarget() {
     };
   }
 
-  if (selectedLibrarySource?.sourceHash) {
+  if (hasPersistentStorage() && selectedLibrarySource?.sourceHash) {
     return {
       key: `library:${selectedLibrarySource.sourceHash}`,
       sourceLabel: getSourceDisplayName(selectedLibrarySource, '已保存原始字体'),
@@ -582,7 +556,7 @@ function getCurrentSourceInspectionTarget() {
     };
   }
 
-  if (getSelectedOperationMode() === 'incremental' && matchedSourceState?.sourceHash) {
+  if (hasPersistentStorage() && getSelectedOperationMode() === 'incremental' && matchedSourceState?.sourceHash) {
     return {
       key: `matched:${matchedSourceState.sourceHash}`,
       sourceLabel: getSourceDisplayName(matchedSourceState, '自动匹配原始字体'),
@@ -735,7 +709,7 @@ function getPreflightState() {
       tone: 'ready',
       message: `原始全量字体已自动匹配：${getSourceDisplayName(matchedSourceState)}。`
     });
-  } else if (operationMode === 'incremental' && getExistingSubsetMatchTarget()) {
+  } else if (hasPersistentStorage() && operationMode === 'incremental' && getExistingSubsetMatchTarget()) {
     items.push({
       tone: 'blocking',
       message: '正在等待原始全量字体自动匹配；如果长时间没有结果，再手动上传。'
@@ -744,7 +718,9 @@ function getPreflightState() {
     items.push({
       tone: 'blocking',
       message:
-        operationMode === 'incremental'
+        !hasPersistentStorage()
+          ? '请上传原始全量字体；当前仅转换模式不会保存或自动匹配原始字体。'
+          : operationMode === 'incremental'
           ? '请先提供当前子集字体，让系统自动匹配原始全量字体。'
           : '请先上传原始全量字体，或从已保存列表里选择一份。'
     });
@@ -922,17 +898,18 @@ function updateSourceFontMeta() {
     message = `自动匹配：${getSourceDisplayName(matchedSourceState)} (${formatBytes(matchedSourceState.sourceSize)})`;
     applySourceStatePresentation('matched', '自动匹配成功', '系统已根据当前子集字体自动匹配到这份原始全量字体。');
   } else {
+    const canAutoMatch = getSelectedOperationMode() === 'incremental' && hasPersistentStorage();
     message =
-      getSelectedOperationMode() === 'incremental'
+      canAutoMatch
         ? '等待自动匹配，或手动选择原始全量字体'
         : '还没有选择文件';
 
     applySourceStatePresentation(
-      getSelectedOperationMode() === 'incremental' ? 'pending-match' : 'empty',
-      getSelectedOperationMode() === 'incremental' ? '等待匹配' : '待选择',
-      getSelectedOperationMode() === 'incremental'
+      canAutoMatch ? 'pending-match' : 'empty',
+      canAutoMatch ? '等待匹配' : '待选择',
+      canAutoMatch
         ? '提供当前子集字体后，系统会优先自动匹配原始字体。'
-        : '上传后这里会显示当前生效的原始字体来源。'
+        : '请上传原始全量字体，上传后会自动检查字体。'
     );
   }
 
@@ -946,28 +923,39 @@ function updateWorkflowCopy() {
   const hasManualSource = hasExplicitSourceSelection();
   const hasMatchedSource = operationMode === 'incremental' && Boolean(matchedSourceState?.sourceHash);
   const hasResolvedSource = hasSourceFontForCurrentOperation();
+  const canSave = hasPersistentStorage();
+  const fontUploadHint = `TTF / OTF / WOFF / WOFF2 / EOT / SVG · 最大 ${formatBytes(maxFontBytes)}`;
 
   panel.classList.toggle('is-incremental-mode', operationMode === 'incremental');
   sourceSetupCard.classList.toggle('is-ready', hasResolvedSource);
 
   if (operationMode === 'incremental') {
     operationTitle.textContent = '为现有字体补充新字符';
-    operationLead.textContent =
-      '增量更新会先读取你现有的子集字体，自动找回对应的原始全量字体；只有匹配不到时，才需要手动补充原始字体。';
+    operationLead.textContent = canSave
+      ? '增量更新会先读取你现有的子集字体，自动找回对应的原始全量字体；只有匹配不到时，才需要手动补充原始字体。'
+      : '提供当前子集字体和原始全量字体，再添加需要的新字符。当前仅转换模式需要每次手动提供原始字体。';
     sourceSectionEyebrow.textContent = '原始字体';
     sourceSectionTitle.textContent = '确认原始全量字体';
     sourceLibraryTitle.textContent = '已保存原始字体（手动指定）';
     optionsEyebrow.textContent = 'STEP 02 / CHARACTERS';
     optionsLead.textContent =
       '选好当前子集字体和原始来源后，再决定这次要新增哪些字符。默认还会去掉 hinting 和 kerning，进一步减小文件。';
-    subsetFootnote.textContent =
-      '提醒：很多 OTF 本身并不包含可保留的 hinting 或 kerning 表，这种情况下勾选它们不会改变体积。增量更新时先提供当前子集字体来源（网络地址或本地文件），系统会自动匹配原始全量字体；匹配不到时再在这里手动上传或从保存列表里指定。';
+    subsetFootnote.textContent = canSave
+      ? '提醒：很多 OTF 本身并不包含可保留的 hinting 或 kerning 表，这种情况下勾选它们不会改变体积。增量更新时先提供当前子集字体来源（网络地址或本地文件），系统会自动匹配原始全量字体；匹配不到时再在这里手动上传或从保存列表里指定。'
+      : '增量更新需要当前子集字体和对应的原始全量字体。当前仅转换模式不会保存字体或匹配记录；很多 OTF 不含 hinting 或 kerning 表，勾选保留不会改变体积。';
 
     if (hasManualSource) {
       sourceSectionLead.textContent =
         '你已经手动指定了原始全量字体，系统会优先使用这份来源。需要的话，可以在这里继续替换。';
       dropzoneTitle.textContent = '如需更换原始全量字体，可重新拖入或点击选择';
-      dropzoneHint.textContent = '也可以直接从下方服务端已保存的原始字体里切换来源。';
+      dropzoneHint.textContent = canSave ? '也可以直接从下方服务端已保存的原始字体里切换来源。' : fontUploadHint;
+      return;
+    }
+
+    if (!canSave) {
+      sourceSectionLead.textContent = '请上传生成当前子集时使用的原始全量字体，以便补充新字符。';
+      dropzoneTitle.textContent = '拖入原始全量字体，或点击这里选择';
+      dropzoneHint.textContent = fontUploadHint;
       return;
     }
 
@@ -991,13 +979,14 @@ function updateWorkflowCopy() {
     '第一次压缩时，流程最简单：上传完整字体，选择保留字符，再直接转换下载。';
   sourceSectionEyebrow.textContent = '原始字体';
   sourceSectionTitle.textContent = '选择原始全量字体';
-  sourceSectionLead.textContent =
-    '上传一份完整字体，或直接复用服务端已保存的原始字体，作为这次压缩的来源。';
+  sourceSectionLead.textContent = canSave
+    ? '上传一份完整字体，或直接复用服务端已保存的原始字体，作为这次压缩的来源。'
+    : '上传一份完整字体作为压缩来源。转换后请下载结果，原始字体不会保存在服务端。';
   sourceLibraryTitle.textContent = '已保存原始字体';
   dropzoneTitle.textContent = hasManualSource
     ? '拖入新的原始全量字体，或点击这里替换当前选择'
     : '拖入原始全量字体，或点击这里选择';
-  dropzoneHint.textContent = '原始字体支持：TTF / OTF / WOFF / WOFF2 / EOT / SVG';
+  dropzoneHint.textContent = fontUploadHint;
   optionsEyebrow.textContent = 'STEP 02 / CHARACTERS';
   optionsLead.textContent =
     '只保留你真正会用到的字符，是缩小输出字体体积最有效的方法。默认还会去掉 hinting 和 kerning，进一步减小文件。';
@@ -1041,26 +1030,32 @@ function renderSourceLibrary() {
   const hasSelection = Boolean(sourceFontSelect.value);
   const aliasRecord = sourceLibraryRecords.find((item) => item.sourceHash === sourceFontSelect.value) || null;
   const hasExplicitSelection = hasExplicitSourceSelection();
+  sourceFontSelect.disabled = !sourceLibraryRecords.length;
   useSavedSourceButton.disabled = !hasSelection;
   resetSourceButton.disabled = !hasExplicitSelection;
   deleteSavedSourceButton.disabled = !hasSelection;
   sourceFontAlias.disabled = !hasSelection;
   saveSourceAliasButton.disabled = !hasSelection;
   sourceFontAlias.value = aliasRecord?.alias || '';
-  sourceLibraryMeta.textContent =
-    operationMode === 'incremental'
+  sourceLibraryMeta.textContent = storageState.error || (!hasPersistentStorage()
+    ? '当前仅转换、不保存字体，字体库和自动匹配暂不可用。刷新页面后需重新上传原始字体；以后启用 R2 即可使用保存功能。'
+    : operationMode === 'incremental'
       ? sourceLibraryRecords.length
-        ? `${repositoryStorageState.enabled ? '仓库' : '服务端'}已保存 ${sourceLibraryRecords.length} 个原始字体。自动匹配不合适时，可以直接从这里手动指定来源。`
+        ? `Cloudflare 字体库已保存 ${sourceLibraryRecords.length} 个原始字体。自动匹配不合适时，可以直接从这里手动指定来源。`
         : '当前还没有已保存的原始字体可供手动指定；完成一次转换后，原始字体会自动出现在这里。'
       : sourceLibraryRecords.length
-        ? `${repositoryStorageState.enabled ? '仓库' : '服务端'}已保存 ${sourceLibraryRecords.length} 个原始字体，可直接复用作为新的压缩来源。`
-        : repositoryStorageState.enabled
-          ? '完成一次转换后，原始字体会自动保存到当前仓库，后续可直接从这里选择。'
-          : '完成一次转换后，原始字体会自动保存在服务端数据目录，后续可直接从这里选择。';
+        ? `Cloudflare 字体库已保存 ${sourceLibraryRecords.length} 个原始字体，可直接复用作为新的压缩来源。`
+        : '完成一次转换后，原始字体会自动保存到 Cloudflare 字体库，后续可直接从这里选择。');
   updateWorkflowCopy();
 }
 
 async function loadSourceLibrary() {
+  if (!hasPersistentStorage()) {
+    sourceLibraryRecords = [];
+    renderSourceLibrary();
+    return true;
+  }
+
   try {
     const response = await apiFetch('/api/source-fonts');
 
@@ -1112,6 +1107,12 @@ function resetOriginalSourceSelection() {
   updateSourceFontMeta();
   updateConvertButtonState();
 
+  if (!hasPersistentStorage()) {
+    clearMatchedSource();
+    updateStatus('已重置原始字体，请重新上传。当前仅转换模式需要手动提供原始全量字体。');
+    return;
+  }
+
   if (getSelectedOperationMode() !== 'incremental') {
     updateStatus('已重置原始字体，请重新上传，或从已保存原始字体中选择一个。');
     return;
@@ -1148,7 +1149,9 @@ function setSelectedFile(file) {
       sourceMatchMeta.textContent = `将使用手动上传的原始字体：${selectedFile.name}。`;
     }
   } else if (getSelectedOperationMode() === 'incremental') {
-    updateStatus('请选择当前子集字体，系统会尝试自动匹配原始全量字体。');
+    updateStatus(hasPersistentStorage()
+      ? '请选择当前子集字体，系统会尝试自动匹配原始全量字体。'
+      : '增量更新需要当前子集字体和原始全量字体，请手动上传原始全量字体。');
     if (getExistingSubsetMatchTarget()) {
       scheduleOriginalSourceMatch();
     }
@@ -1294,6 +1297,9 @@ function updateSubsetSummary() {
 }
 
 async function readFileAsBase64(file) {
+  if (file.size > maxFontBytes) {
+    throw new Error(`字体文件最大 ${formatBytes(maxFontBytes)}，请先选择较小的字体。`);
+  }
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
 
@@ -1757,7 +1763,7 @@ function scheduleSubsetPreview() {
   }, 450);
 }
 
-function clearMatchedSource(message = '选择当前子集字体后，会自动匹配曾用于生成它的原始全量字体。') {
+function clearMatchedSource(message = getDefaultSourceMatchMessage()) {
   matchedSourceState = null;
   sourceMatchRequestId += 1;
   sourceMatchMeta.textContent = message;
@@ -1829,9 +1835,14 @@ async function matchOriginalSourceForExistingSubset() {
     return null;
   }
 
+  if (!hasPersistentStorage()) {
+    clearMatchedSource();
+    return null;
+  }
+
   const target = getExistingSubsetMatchTarget();
   if (!target) {
-    clearMatchedSource('选择当前子集字体后，会自动匹配曾用于生成它的原始全量字体。');
+    clearMatchedSource();
     return null;
   }
 
@@ -1897,6 +1908,11 @@ function scheduleOriginalSourceMatch() {
   updateSourceFontMeta();
   updateConvertButtonState();
 
+  if (!hasPersistentStorage()) {
+    clearMatchedSource();
+    return;
+  }
+
   const remoteUrl = getExistingSubsetUrlValue();
   if (remoteUrl && !isValidRemoteFontUrl(remoteUrl)) {
     clearMatchedSource('当前子集字体 URL 还不完整，填成 http:// 或 https:// 后再自动匹配原始字体。');
@@ -1905,7 +1921,7 @@ function scheduleOriginalSourceMatch() {
 
   const target = getExistingSubsetMatchTarget();
   if (!target) {
-    clearMatchedSource('选择当前子集字体后，会自动匹配曾用于生成它的原始全量字体。');
+    clearMatchedSource();
     return;
   }
 
@@ -1931,6 +1947,10 @@ async function getSourceFontPayload(operationMode) {
       hash,
       source: 'manual'
     };
+  }
+
+  if (!hasPersistentStorage()) {
+    throw new Error('当前仅转换模式需要手动上传原始全量字体。');
   }
 
   if (selectedLibrarySource?.sourceHash) {
@@ -2203,9 +2223,9 @@ async function convertSelectedFile() {
     const subsetGlyphHintingStripped = Number(response.headers.get('X-Subset-Glyph-Hinting-Stripped') || 0);
     const responseOutputType = response.headers.get('X-Output-Type') || outputType;
     const serverSourceSaved = response.headers.get('X-Server-Source-Saved') === 'true';
-    const serverSourceAction = response.headers.get('X-Server-Source-Action') || (serverSourceSaved ? 'created' : 'reused');
+    const serverSourceAction = response.headers.get('X-Server-Source-Action') || (serverSourceSaved ? 'created' : 'skipped');
     const serverMatchSaved = response.headers.get('X-Server-Match-Saved') === 'true';
-    const serverMatchAction = response.headers.get('X-Server-Match-Action') || (serverMatchSaved ? 'created' : 'updated');
+    const serverMatchAction = response.headers.get('X-Server-Match-Action') || (serverMatchSaved ? 'created' : 'skipped');
     const fallbackName = `${sourcePayload.filename.replace(/\.[^.]+$/, '') || 'converted-font'}.${responseOutputType}`;
     const outputName = decodeURIComponent(
       contentDisposition.match(/filename="(.+?)"/)?.[1] || fallbackName
@@ -2214,6 +2234,13 @@ async function convertSelectedFile() {
       await loadSourceLibrary();
     }
 
+    const sourcePersisted = ['created', 'updated', 'reused'].includes(serverSourceAction);
+    const matchPersisted = ['created', 'updated', 'reused'].includes(serverMatchAction);
+    resultFootnote.textContent = sourcePersisted
+      ? matchPersisted
+        ? '原始字体和匹配记录已保存，可在字体库中继续复用。'
+        : '原始字体已保存到字体库；本次未保存自动匹配记录。'
+      : '本次仅转换，原始字体和匹配记录未保存。请下载结果；后续增量更新需再次提供原始全量字体。';
     workflow.setResult({ blob, outputName, sourceBytes, outputBytes, subsetCount });
     const outputPreviewCharacters =
       operationMode === 'incremental' || subsetPayload.subsetMode === 'full'
@@ -2254,6 +2281,8 @@ async function convertSelectedFile() {
       notes.push('原始字体已保存到服务端列表');
     } else if (serverSourceAction === 'updated') {
       notes.push('检测到同源字体，已刷新服务端原始字体记录');
+    } else if (serverSourceAction === 'skipped') {
+      notes.push('本次仅转换，原始字体和匹配记录未保存');
     }
     if (renderedOutputPreview) {
       notes.push('已生成压缩完成字体预览');
@@ -2409,11 +2438,7 @@ deleteSavedSourceButton.addEventListener('click', async () => {
     }
 
     renderSourceLibrary();
-    updateStatus(
-      repositoryStorageState.enabled
-        ? `已从字体仓库删除：${getSourceDisplayName(record)}。`
-        : `已从本地列表移除：${getSourceDisplayName(record)}。`
-    );
+    updateStatus(`已从 Cloudflare 字体库移除：${getSourceDisplayName(record)}。`);
   } catch (error) {
     updateStatus(error instanceof Error ? error.message : '原始字体移除失败。', 'error');
   }
@@ -2421,47 +2446,6 @@ deleteSavedSourceButton.addEventListener('click', async () => {
 
 subsetPreviewMore.addEventListener('click', () => {
   appendPreviewCharacters('subset');
-});
-
-connectRepositoryButton.addEventListener('click', async () => {
-  if (!repositoryStorageState.available) {
-    repositoryStorageMeta.textContent = '服务端尚未配置远程字体仓库环境变量。';
-    repositoryStoragePanel.open = true;
-    return;
-  }
-
-  repositoryStorageState.enabled = true;
-  persistRepositoryStorageState();
-  renderRepositoryStorageState();
-  connectRepositoryButton.disabled = true;
-  repositoryStorageMeta.textContent = '正在读取服务端远程字体仓库...';
-  const succeeded = await loadSourceLibrary();
-
-  if (succeeded) {
-    selectedLibrarySource = null;
-    matchedSourceState = null;
-    renderSourceLibrary();
-    updateSourceFontMeta();
-    updateConvertButtonState();
-    renderRepositoryStorageState();
-    updateStatus(`已切换到远程字体仓库：${repositoryStorageState.displayName}。`);
-  } else {
-    repositoryStorageMeta.textContent = sourceLibraryMeta.textContent;
-    repositoryStoragePanel.open = true;
-    connectRepositoryButton.disabled = false;
-  }
-});
-
-useLocalStorageButton.addEventListener('click', async () => {
-  repositoryStorageState.enabled = false;
-  selectedLibrarySource = null;
-  matchedSourceState = null;
-  persistRepositoryStorageState();
-  renderRepositoryStorageState();
-  await loadSourceLibrary();
-  updateSourceFontMeta();
-  updateConvertButtonState();
-  updateStatus('已切换为本地字体存储，远程仓库环境变量配置仍保留在服务端。');
 });
 
 subsetPreviewCopy.addEventListener('click', () => {
@@ -2616,8 +2600,6 @@ dropzone.addEventListener('drop', (event) => {
 async function initializeApp() {
   syncUI();
   updateExistingSubsetMeta();
-  restoreRepositoryStorageState();
-  renderRepositoryStorageState();
   await loadRuntimeConfig();
   await Promise.all([loadSourceLibrary(), loadCharsetPresets()]);
 }

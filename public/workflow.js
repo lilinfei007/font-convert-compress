@@ -4,7 +4,7 @@ export function createWorkflow({ getState }) {
   const steps = [...document.querySelectorAll('[data-step]')];
   const navigation = [...document.querySelectorAll('[data-step-target]')];
   const tips = [
-    '首次转换后，原始字体会自动保存，下次可以直接复用。',
+    '上传原始全量字体，选择需要保留的字符。',
     '只保留实际用到的字符，通常比单纯转换格式更能减小体积。',
     'WOFF2 适合现代网页；需要安装到电脑时，可以选择 TTF。',
     '以后补充文案时，使用增量更新，就能保留旧字符并加入新内容。'
@@ -115,7 +115,7 @@ export function createWorkflow({ getState }) {
   $('workflowFields').addEventListener('input', invalidate);
   $('workflowFields').addEventListener('change', invalidate);
   // Source choices made by buttons also change the export inputs.
-  ['useSavedSourceButton', 'resetSourceButton', 'deleteSavedSourceButton', 'connectRepositoryButton', 'useLocalStorageButton'].forEach(id => {
+  ['useSavedSourceButton', 'resetSourceButton', 'deleteSavedSourceButton'].forEach(id => {
     $(id).addEventListener('click', invalidate);
   });
   window.addEventListener('beforeunload', () => { if (resultUrl) URL.revokeObjectURL(resultUrl); });
