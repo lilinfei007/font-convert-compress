@@ -568,13 +568,35 @@ async function fontPayload(body: JsonBody): Promise<FontPayload> {
 }
 async function handlePreview(body: JsonBody): Promise<Response> {
   const payload = await fontPayload(body);
-  const { type, sourceBuffer, fontObject } = await createFontFromPayload({
+  const { type, sourceBuffer, font, fontObject } = await createFontFromPayload({
     ...payload,
     keepHinting: true,
     keepKerning: true
   });
   const codePoints = extractCmapCodePoints(fontObject);
   const features = inspectFontFeatures(fontObject);
+  let previewFont: { type: FontType; base64Data: string } | undefined;
+  if (booleanField(body, 'includePreviewFont', false)) {
+    // SVG and EOT remain valid input/export formats, but modern browsers cannot
+    // load them as web fonts. Produce a separate read-only rendering asset; keep
+    // the original bytes and fingerprint intact for subsequent conversions.
+    if (type === 'svg' || type === 'eot') {
+      const output = font.write({
+        type: 'woff',
+        hinting: true,
+        kerning: true,
+        deflate: (bytes) => Array.from(deflateSync(Buffer.from(bytes)))
+      });
+      const bytes = Buffer.isBuffer(output)
+        ? output
+        : typeof output === 'string'
+          ? Buffer.from(output)
+          : Buffer.from(new Uint8Array(output));
+      previewFont = { type: 'woff', base64Data: bytes.toString('base64') };
+    } else {
+      previewFont = { type, base64Data: payload.base64Data };
+    }
+  }
   return json({
     filename: payload.filename,
     type,
@@ -584,6 +606,7 @@ async function handlePreview(body: JsonBody): Promise<Response> {
     count: codePoints.length,
     codePoints,
     characters: codePointsToText(codePoints),
+    ...(previewFont ? { previewFont } : {}),
     base64Data: booleanField(body, 'includeData', true)
       ? payload.base64Data
       : ''
@@ -989,7 +1012,10 @@ function repairOtfGlyphMetrics(
 
 function listCharsetPresets() {
   return [...charsetPresets.values()].map(
-    ({ text: _text, ...preset }) => preset
+    ({ text, ...preset }) => ({
+      ...preset,
+      characters: codePointsToText(getSubsetCodePoints(text))
+    })
   );
 }
 async function loadCharsetPreset(id?: string) {
@@ -1044,8 +1070,11 @@ async function resolveSubsetSource({
   }
 
   if (normalizedMode === 'file') {
-    if (typeof charsetFileText !== 'string' || !charsetFileText.trim()) {
-      throw new HttpError(400, '上传的字符集文件为空，请重新选择。');
+    if (
+      typeof charsetFileText !== 'string' ||
+      !getSubsetCodePoints(charsetFileText).length
+    ) {
+      throw new HttpError(400, '上传的字符集文件没有可用字符，请重新选择。');
     }
 
     return {

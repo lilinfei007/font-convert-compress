@@ -15,6 +15,50 @@ const legacyRepositoryVars = {
   FONT_REPOSITORY_PATH: 'unused-path'
 };
 
+async function assertPreviewAsset(post, details, inputType, originalData) {
+  const expectedType = ['svg', 'eot'].includes(inputType) ? 'woff' : inputType;
+  assert.equal(details.previewFont.type, expectedType);
+  assert.ok(details.previewFont.base64Data.length > 0);
+  if (expectedType === inputType) {
+    assert.equal(details.previewFont.base64Data, originalData);
+  } else {
+    assert.equal(
+      Buffer.from(details.previewFont.base64Data, 'base64').subarray(0, 4).toString(),
+      'wOFF'
+    );
+  }
+  const rendered = await post('/api/font-preview', {
+    filename: 'browser-preview.' + expectedType,
+    data: details.previewFont.base64Data,
+    includeData: false
+  });
+  assert.equal(rendered.status, 200);
+  const decoded = await rendered.json();
+  assert.deepEqual(decoded.codePoints, details.codePoints);
+  assert.equal(decoded.glyphCount, details.glyphCount);
+  assert.equal(Object.hasOwn(decoded, 'previewFont'), false);
+}
+
+async function assertReadOnlyPreview(base, post, input) {
+  const before = await (await fetch(base + '/api/source-fonts')).json();
+  const response = await post('/api/font-preview', {
+    ...input,
+    includeData: false,
+    includePreviewFont: true
+  });
+  assert.equal(response.status, 200);
+  const details = await response.json();
+  assert.equal(details.type, 'svg');
+  assert.equal(details.base64Data, '');
+  assert.deepEqual(new Set(details.characters), new Set(' ABC1'));
+  await assertPreviewAsset(post, details, 'svg', input.data);
+  assert.deepEqual(
+    await (await fetch(base + '/api/source-fonts')).json(),
+    before,
+    'previewing uploaded fonts must not save originals or modify the library'
+  );
+}
+
 test(
   'Cloudflare runtime: assets, conversion, R2 persistence, concurrency and validation',
   { timeout: 120000 },
@@ -70,6 +114,11 @@ test(
         presets.presets.map((item) => item.count),
         [3500, 6500]
       );
+      for (const preset of presets.presets) {
+        assert.equal(Array.from(preset.characters).length, preset.count);
+        assert.equal(new Set(preset.characters).size, preset.count);
+        assert.equal(preset.characters, preset.characters.normalize('NFC'));
+      }
       const health = await (await fetch(base + '/api/health')).json();
       assert.equal(health.ok, true);
       assert.equal(health.runtime, 'cloudflare-workers');
@@ -91,6 +140,7 @@ test(
         subsetText: 'ABBA',
         operationMode: 'fresh'
       };
+      await assertReadOnlyPreview(base, post, input);
       let subset, sourceHash, outputHash;
       for (const outputType of ['ttf', 'woff', 'woff2', 'eot', 'svg']) {
         const response = await post('/api/convert', { ...input, outputType });
@@ -105,7 +155,8 @@ test(
         const decoded = await post('/api/font-preview', {
           filename: 'roundtrip.' + outputType,
           data: bytes.toString('base64'),
-          includeData: false
+          includeData: false,
+          includePreviewFont: true
         });
         assert.equal(
           decoded.status,
@@ -119,6 +170,7 @@ test(
           outputType + ': ' + JSON.stringify(details)
         );
         assert.equal(details.base64Data, '');
+        await assertPreviewAsset(post, details, outputType, bytes.toString('base64'));
         if (outputType === 'ttf') {
           subset = bytes.toString('base64');
           sourceHash = response.headers.get('X-Source-Hash');
@@ -135,6 +187,20 @@ test(
           data: subset
         })
       ).json();
+      assert.equal(originalPreview.base64Data, subset);
+      assert.equal(Object.hasOwn(originalPreview, 'previewFont'), false);
+      const beforeSavedPreview = await (await fetch(base + '/api/source-fonts')).json();
+      const savedPreview = await (await post('/api/font-preview', {
+        sourceFontHash: sourceHash,
+        includeData: false,
+        includePreviewFont: true
+      })).json();
+      await assertPreviewAsset(post, savedPreview, 'svg', source);
+      assert.deepEqual(
+        await (await fetch(base + '/api/source-fonts')).json(),
+        beforeSavedPreview,
+        'previewing stored fonts must not update their library metadata'
+      );
       const expectedCharacters = new Set([
         ...originalPreview.characters,
         'B',
@@ -184,6 +250,14 @@ test(
         outputType: 'ttf'
       });
       assert.equal(empty.status, 400);
+      const controlOnlyFile = await post('/api/convert', {
+        ...input,
+        subsetMode: 'file',
+        charsetFileText: '\u0001\n\u007f',
+        outputType: 'ttf'
+      });
+      assert.equal(controlOnlyFile.status, 400);
+      assert.match((await controlOnlyFile.json()).error, /没有可用字符/);
       const library = await (await fetch(base + '/api/source-fonts')).json();
       assert.ok(JSON.stringify(library).includes(sourceHash));
 
@@ -431,6 +505,7 @@ test(
         subsetMode: 'manual',
         subsetText: 'AB'
       };
+      await assertReadOnlyPreview(base, post, input);
       let subset;
       let outputHash;
       for (const outputType of ['ttf', 'woff', 'woff2', 'eot', 'svg']) {
@@ -453,12 +528,14 @@ test(
         const decoded = await post('/api/font-preview', {
           filename: 'roundtrip.' + outputType,
           data: bytes.toString('base64'),
-          includeData: false
+          includeData: false,
+          includePreviewFont: true
         });
         assert.equal(decoded.status, 200);
         const preview = await decoded.json();
         assert.deepEqual(new Set(preview.characters), new Set('AB'));
         assert.equal(preview.base64Data, '');
+        await assertPreviewAsset(post, preview, outputType, bytes.toString('base64'));
         if (outputType === 'ttf') {
           subset = bytes.toString('base64');
           outputHash = response.headers.get('X-Output-Hash');

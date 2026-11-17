@@ -1,4 +1,5 @@
 import { createWorkflow } from './workflow.js';
+import { computeCoverage, createFontLoader } from './glyph-preview.js';
 
 const fileInput = document.querySelector('#fontFile');
 const fileName = document.querySelector('#fileName');
@@ -71,26 +72,18 @@ const OUTPUT_FORMAT_LABELS = {
   eot: 'EOT',
   svg: 'SVG'
 };
-const FONT_MIME_TYPES = {
-  ttf: 'font/ttf',
-  otf: 'font/otf',
-  woff: 'font/woff',
-  woff2: 'font/woff2',
-  eot: 'application/vnd.ms-fontobject',
-  svg: 'image/svg+xml'
-};
-const FONT_FORMAT_HINTS = {
-  ttf: 'truetype',
-  otf: 'opentype',
-  woff: 'woff',
-  woff2: 'woff2',
-  eot: 'embedded-opentype',
-  svg: 'svg'
-};
-const PREVIEW_BATCH_SIZE = 600;
+const PREVIEW_BATCH_SIZE = 200;
+const fontLoader = createFontLoader();
+let sourceInspectionController;
+let subsetPreviewController;
+let subsetInspectionState = { status: 'idle', payload: null, error: '' };
+let livePreviewTimer;
+let composingCharacters = false;
+let statusOverride = null;
 let maxFontBytes = 16 * 1024 * 1024;
 
 let selectedFile = null;
+let sourceSelectionRevision = 0;
 let charsetPresets = [];
 let charsetFileLoadState = 'idle';
 let charsetFileLoadError = '';
@@ -116,8 +109,6 @@ let sourceInspectionRequestId = 0;
 let subsetPreviewRequestId = 0;
 let subsetPreviewTimer = 0;
 let subsetPreviewTargetKey = '';
-let subsetPreviewStyle = null;
-let outputPreviewStyle = null;
 let storageState = {
   loaded: false,
   r2Available: false,
@@ -131,6 +122,10 @@ let sourceInspectionState = {
   error: ''
 };
 const previewStates = {
+  live: {
+    items: [], parsedCount: 0, displayCount: 0, renderedCount: 0,
+    filename: '', context: '', family: '', missingItems: [], copyText: '', copyCount: 0, copyResetTimer: 0
+  },
   subset: {
     items: [],
     parsedCount: 0,
@@ -164,27 +159,73 @@ const previewStates = {
 const workflow = createWorkflow({
   getState: () => ({
     sourceReady: hasSourceFontForCurrentOperation() && sourceInspectionState.status === 'ready' &&
-      (getSelectedOperationMode() !== 'incremental' || (hasExistingSubsetSource() &&
-        (!getExistingSubsetUrlValue() || isValidRemoteFontUrl(getExistingSubsetUrlValue())))),
-    sourceMessage: sourceInspectionState.status === 'error' ? sourceInspectionState.error :
+      (getSelectedOperationMode() !== 'incremental' || subsetInspectionState.status === 'ready'),
+    sourceMessage: getSelectedOperationMode() === 'incremental' && subsetInspectionState.status !== 'ready'
+      ? subsetInspectionState.error || '先加载已有的小字体文件。' : sourceInspectionState.status === 'error' ? sourceInspectionState.error :
       sourceInspectionState.status === 'loading' ? '正在解析字体，请稍候…' : '选择一份原始字体后继续。',
     charactersReady: getSubsetModeValidationState().ready,
     charactersMessage: getSubsetModeValidationState().message,
     sourceName: selectedFile?.name || getSourceDisplayName(selectedLibrarySource || matchedSourceState || {}, '尚未选择'),
-    mode: getSelectedOperationMode() === 'incremental' ? '增量更新' : '新建字体',
+    mode: getSelectedOperationMode() === 'incremental' ? '更新小字体' : '制作小字体',
+    incremental: getSelectedOperationMode() === 'incremental',
     characters: subsetSummary.textContent,
     format: getSelectedOutputLabel(),
     ready: getPreflightState().blockingItems.length === 0,
     formatBytes
-  })
+  }),
+  onNavigate: (step) => {
+    if (step !== 2) statusOverride = null;
+    refreshWorkspaceStatus();
+    scheduleLivePreview();
+  }
 });
 
 function updateStatus(message, tone = 'default') {
-  status.textContent = message;
-  status.className = 'status';
+  statusOverride = { message, tone };
+  paintStatus(message, tone);
+}
 
-  if (tone !== 'default') {
-    status.classList.add(`is-${tone}`);
+function paintStatus(message, tone = 'default') {
+  status.textContent = message;
+  status.className = `status is-${tone}`;
+  document.querySelector('#statusBanner').dataset.tone = tone;
+  document.querySelector('#statusBanner').className = `status-banner is-${tone}`;
+  document.querySelector('#statusTitle').textContent = {
+    busy: '正在处理', error: '需要处理', warning: '请检查字符', success: '已完成', ready: '已就绪'
+  }[tone] || '下一步';
+}
+
+function refreshWorkspaceStatus() {
+  if (statusOverride && (['error', 'success', 'busy'].includes(statusOverride.tone) || workflow.current === 2)) {
+    paintStatus(statusOverride.message, statusOverride.tone);
+    return;
+  }
+  const incremental = getSelectedOperationMode() === 'incremental';
+  if (incremental && subsetInspectionState.status === 'error') {
+    paintStatus(subsetInspectionState.error, 'error');
+  } else if (sourceInspectionState.status === 'error') {
+    paintStatus(sourceInspectionState.error, 'error');
+  } else if (sourceInspectionState.status === 'loading' || (incremental && subsetInspectionState.status === 'loading')) {
+    paintStatus('正在读取字体和加载真实字形，请稍候…', 'busy');
+  } else if (incremental && subsetInspectionState.status !== 'ready') {
+    paintStatus('先选择已有的小字体文件，查看它已包含的字符。');
+  } else if (sourceInspectionState.status !== 'ready') {
+    paintStatus(incremental ? '旧字体已读取。请补充对应的完整字体，用它提取新增字形。' : '选择一份完整字体，开始制作小字体。');
+  } else if (fontLoader.get('source').status === 'error' || (incremental && fontLoader.get('subset').status === 'error')) {
+    paintStatus('字符已解析，但浏览器未能加载字形。请点击“重试字形预览”；导出仍可使用。', 'warning');
+  } else {
+    const coverage = getCharacterCoverage();
+    if (coverage.lost.length) {
+      paintStatus(`当前完整字体缺少 ${coverage.lost.length} 个旧字符；继续生成将无法保留这些字符，请核对完整字体。`, 'warning');
+    } else if (coverage.missing.length) {
+      paintStatus(`有 ${coverage.missing.length} 个输入字符在完整字体中不存在，输出不会包含它们。请检查标记为“缺失”的字符。`, 'warning');
+    } else if (workflow.current === 0) {
+      paintStatus('字体已就绪，可以开始编辑字符。', 'ready');
+    } else if (!getSubsetModeValidationState().ready) {
+      paintStatus(getSubsetModeValidationState().message);
+    } else {
+      paintStatus(`预计输出 ${coverage.output.length} 个字符。确认字形和输出格式后，点击生成。`, 'ready');
+    }
   }
 }
 
@@ -540,7 +581,7 @@ function getSubsetModeValidationState() {
 function getCurrentSourceInspectionTarget() {
   if (selectedFile) {
     return {
-      key: `manual:${selectedFile.name}:${selectedFile.size}:${selectedFile.lastModified}`,
+      key: `manual:${sourceSelectionRevision}:${selectedFile.name}:${selectedFile.size}:${selectedFile.lastModified}`,
       sourceLabel: selectedFile.name,
       kind: 'file',
       file: selectedFile
@@ -569,6 +610,9 @@ function getCurrentSourceInspectionTarget() {
 }
 
 function resetSourceInspectionState() {
+  sourceInspectionController?.abort();
+  setPreviewMessage('live', '选择完整字体后，可预览字形。');
+  fontLoader.clear('source');
   sourceInspectionState = {
     key: '',
     status: 'idle',
@@ -595,13 +639,18 @@ async function inspectSourceFontForPreflight(force = false) {
       return sourceInspectionState.payload;
     }
 
-    if (sourceInspectionState.status === 'loading') {
+    if (sourceInspectionState.status === 'loading' || sourceInspectionState.status === 'error') {
       return null;
     }
   }
 
   const requestId = sourceInspectionRequestId + 1;
   sourceInspectionRequestId = requestId;
+  sourceInspectionController?.abort();
+  const controller = new AbortController();
+  sourceInspectionController = controller;
+  setPreviewMessage('live', '正在加载这份完整字体的字形…');
+  fontLoader.clear('source');
   sourceInspectionState = {
     key: target.key,
     status: 'loading',
@@ -609,6 +658,7 @@ async function inspectSourceFontForPreflight(force = false) {
     payload: null,
     error: ''
   };
+  applySourceStatePresentation('manual', '读取中', '正在解析字符并加载真实字形。');
   updateConvertButtonState();
 
   try {
@@ -617,11 +667,13 @@ async function inspectSourceFontForPreflight(force = false) {
         ? {
             filename: target.file.name,
             data: await readFileAsBase64(target.file),
-            includeData: false
+            includeData: false,
+            includePreviewFont: true
           }
         : {
             sourceFontHash: target.sourceFontHash,
-            includeData: false
+            includeData: false,
+            includePreviewFont: true
           };
 
     const response = await apiFetch('/api/font-preview', {
@@ -629,7 +681,8 @@ async function inspectSourceFontForPreflight(force = false) {
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify(requestPayload)
+      body: JSON.stringify(requestPayload),
+      signal: controller.signal
     });
 
     if (!response.ok) {
@@ -643,6 +696,8 @@ async function inspectSourceFontForPreflight(force = false) {
       return null;
     }
 
+    try { await fontLoader.load('source', payload); } catch { /* Parsing still allows export; show preview error separately. */ }
+    if (requestId !== sourceInspectionRequestId) return null;
     sourceInspectionState = {
       key: target.key,
       status: 'ready',
@@ -650,6 +705,7 @@ async function inspectSourceFontForPreflight(force = false) {
       payload,
       error: ''
     };
+    applySourceStatePresentation('manual', '解析完成', `已识别 ${payload.count} 个字符，可开始编辑。`);
     updateConvertButtonState();
     return payload;
   } catch (error) {
@@ -664,6 +720,7 @@ async function inspectSourceFontForPreflight(force = false) {
       payload: null,
       error: error instanceof Error ? error.message : '原始字体特性读取失败。'
     };
+    applySourceStatePresentation('manual', '读取失败', sourceInspectionState.error);
     updateConvertButtonState();
     return null;
   }
@@ -825,6 +882,18 @@ function getPreflightState() {
     items.push({ tone: 'blocking', message: sourceInspectionState.status === 'error'
       ? sourceInspectionState.error : '正在解析原始字体，请稍候。' });
   }
+  if (operationMode === 'incremental' && hasExistingSubsetSource() && subsetInspectionState.status !== 'ready') {
+    items.push({ tone: 'blocking', message: subsetInspectionState.status === 'error'
+      ? subsetInspectionState.error : '正在读取旧字体，请等待解析完成。' });
+  }
+  if (sourceInspectionState.status === 'ready' && (operationMode !== 'incremental' || subsetInspectionState.status === 'ready')) {
+    const coverage = getCharacterCoverage();
+    if (subsetState.ready && !coverage.output.length) {
+      items.push({ tone: 'blocking', message: '所选字符在完整字体中均不存在，请更换字符或完整字体。' });
+    }
+    if (coverage.lost.length) items.push({ tone: 'warning', message: `有 ${coverage.lost.length} 个旧字符在完整字体中缺失，生成后将无法保留。请核对原始字体。` });
+    if (coverage.missing.length) items.push({ tone: 'warning', message: `${coverage.missing.length} 个输入字符缺失，不会写入输出字体。` });
+  }
   const blockingItems = items.filter((item) => item.tone === 'blocking');
   const warningItems = [...items, ...featureItems].filter((item) => item.tone === 'warning');
   const firstBlockingMessage = blockingItems[0]?.message || '';
@@ -876,6 +945,8 @@ function updateConvertButtonState() {
   convertButton.title = preflightState.buttonTitle;
   renderPreflightState(preflightState);
   workflow.render();
+  refreshWorkspaceStatus();
+  scheduleLivePreview();
 }
 
 function applySourceStatePresentation(state, badge, hint) {
@@ -914,84 +985,41 @@ function updateSourceFontMeta() {
   }
 
   fileName.textContent = message;
+  if (sourceInspectionState.status === 'ready') {
+    applySourceStatePresentation('manual', '解析完成', `已识别 ${sourceInspectionState.payload.count} 个字符。`);
+  } else if (sourceInspectionState.status === 'loading') {
+    applySourceStatePresentation('manual', '读取中', '正在解析字符并加载字形。');
+  }
   updateWorkflowCopy();
   void inspectSourceFontForPreflight();
 }
 
 function updateWorkflowCopy() {
-  const operationMode = getSelectedOperationMode();
-  const hasManualSource = hasExplicitSourceSelection();
-  const hasMatchedSource = operationMode === 'incremental' && Boolean(matchedSourceState?.sourceHash);
-  const hasResolvedSource = hasSourceFontForCurrentOperation();
-  const canSave = hasPersistentStorage();
-  const fontUploadHint = `TTF / OTF / WOFF / WOFF2 / EOT / SVG · 最大 ${formatBytes(maxFontBytes)}`;
-
-  panel.classList.toggle('is-incremental-mode', operationMode === 'incremental');
-  sourceSetupCard.classList.toggle('is-ready', hasResolvedSource);
-
-  if (operationMode === 'incremental') {
-    operationTitle.textContent = '为现有字体补充新字符';
-    operationLead.textContent = canSave
-      ? '增量更新会先读取你现有的子集字体，自动找回对应的原始全量字体；只有匹配不到时，才需要手动补充原始字体。'
-      : '提供当前子集字体和原始全量字体，再添加需要的新字符。当前仅转换模式需要每次手动提供原始字体。';
-    sourceSectionEyebrow.textContent = '原始字体';
-    sourceSectionTitle.textContent = '确认原始全量字体';
-    sourceLibraryTitle.textContent = '已保存原始字体（手动指定）';
-    optionsEyebrow.textContent = 'STEP 02 / CHARACTERS';
-    optionsLead.textContent =
-      '选好当前子集字体和原始来源后，再决定这次要新增哪些字符。默认还会去掉 hinting 和 kerning，进一步减小文件。';
-    subsetFootnote.textContent = canSave
-      ? '提醒：很多 OTF 本身并不包含可保留的 hinting 或 kerning 表，这种情况下勾选它们不会改变体积。增量更新时先提供当前子集字体来源（网络地址或本地文件），系统会自动匹配原始全量字体；匹配不到时再在这里手动上传或从保存列表里指定。'
-      : '增量更新需要当前子集字体和对应的原始全量字体。当前仅转换模式不会保存字体或匹配记录；很多 OTF 不含 hinting 或 kerning 表，勾选保留不会改变体积。';
-
-    if (hasManualSource) {
-      sourceSectionLead.textContent =
-        '你已经手动指定了原始全量字体，系统会优先使用这份来源。需要的话，可以在这里继续替换。';
-      dropzoneTitle.textContent = '如需更换原始全量字体，可重新拖入或点击选择';
-      dropzoneHint.textContent = canSave ? '也可以直接从下方服务端已保存的原始字体里切换来源。' : fontUploadHint;
-      return;
-    }
-
-    if (!canSave) {
-      sourceSectionLead.textContent = '请上传生成当前子集时使用的原始全量字体，以便补充新字符。';
-      dropzoneTitle.textContent = '拖入原始全量字体，或点击这里选择';
-      dropzoneHint.textContent = fontUploadHint;
-      return;
-    }
-
-    if (hasMatchedSource) {
-      sourceSectionLead.textContent =
-        '系统已根据当前子集字体自动匹配到原始全量字体；如果想覆盖这个结果，再在这里手动指定。';
-      dropzoneTitle.textContent = '如需覆盖自动匹配，可拖入别的原始全量字体';
-      dropzoneHint.textContent = '或者从下方已保存原始字体里手动指定一份新的来源。';
-      return;
-    }
-
-    sourceSectionLead.textContent =
-      '系统会先尝试自动匹配原始全量字体。只有匹配不到时，才需要在这里手动上传或从保存列表里选择。';
-    dropzoneTitle.textContent = '自动匹配失败时，再上传原始全量字体';
-    dropzoneHint.textContent = '你可以先完成上一步提供当前子集字体，系统会优先自动查找对应来源。';
-    return;
+  const incremental = getSelectedOperationMode() === 'incremental';
+  const resolved = hasSourceFontForCurrentOperation();
+  panel.classList.toggle('is-incremental-mode', incremental);
+  sourceSetupCard.classList.toggle('is-ready', resolved && sourceInspectionState.status === 'ready');
+  operationTitle.textContent = incremental ? '更新已有的小字体' : '从完整字体制作小字体';
+  operationLead.textContent = incremental
+    ? '先加载正在使用的小字体，再补充完整字体。旧字符会保留，本次只需输入新增内容。'
+    : '选择一份完整字体，挑出需要的字符，生成更小的字体文件。';
+  sourceSectionTitle.textContent = incremental ? '补充对应的完整字体' : '选择完整字体';
+  sourceSectionLead.textContent = incremental
+    ? '小字体已删去其他字形，新增字符需要从当时使用的完整字体提取。'
+    : '上传需要压缩的字体，下一步输入要保留的字符。';
+  if (incremental && matchedSourceState?.sourceHash && !hasExplicitSourceSelection()) {
+    sourceSectionLead.textContent = '已从字体库匹配到完整字体，也可以手动替换。';
   }
-
-  operationTitle.textContent = '从一份字体开始';
-  operationLead.textContent =
-    '第一次压缩时，流程最简单：上传完整字体，选择保留字符，再直接转换下载。';
-  sourceSectionEyebrow.textContent = '原始字体';
-  sourceSectionTitle.textContent = '选择原始全量字体';
-  sourceSectionLead.textContent = canSave
-    ? '上传一份完整字体，或直接复用服务端已保存的原始字体，作为这次压缩的来源。'
-    : '上传一份完整字体作为压缩来源。转换后请下载结果，原始字体不会保存在服务端。';
-  sourceLibraryTitle.textContent = '已保存原始字体';
-  dropzoneTitle.textContent = hasManualSource
-    ? '拖入新的原始全量字体，或点击这里替换当前选择'
-    : '拖入原始全量字体，或点击这里选择';
-  dropzoneHint.textContent = fontUploadHint;
-  optionsEyebrow.textContent = 'STEP 02 / CHARACTERS';
-  optionsLead.textContent =
-    '只保留你真正会用到的字符，是缩小输出字体体积最有效的方法。默认还会去掉 hinting 和 kerning，进一步减小文件。';
-  subsetFootnote.textContent =
-    '提醒：很多 OTF 本身并不包含可保留的 hinting 或 kerning 表，这种情况下勾选它们不会改变体积。';
+  sourceLibraryTitle.textContent = '已保存的完整字体';
+  dropzoneTitle.textContent = resolved ? '拖入或点击更换完整字体' : '拖入完整字体，或点击选择';
+  dropzoneHint.textContent = 'TTF / OTF / WOFF / WOFF2 / EOT / SVG · 最大 ' + formatBytes(maxFontBytes);
+  sourceSectionEyebrow.textContent = '';
+  optionsEyebrow.textContent = '';
+  optionsLead.textContent = incremental
+    ? '已有字符会一起展示。输入新文案后，可查看新增、已存在和缺失的字形。'
+    : '输入项目文案，下面立即显示完整字体中的真实字形。重复字符会自动合并。';
+  subsetFootnote.textContent = '默认移除字号微调和字距数据以减小体积；按需保留。源字体没有的数据无法补回。';
+  document.querySelector('.library-disclosure').classList.toggle('is-hidden', storageState.loaded && !hasPersistentStorage());
 }
 
 function renderSourceLibrary() {
@@ -1134,6 +1162,7 @@ function resetOriginalSourceSelection() {
 }
 
 function setSelectedFile(file) {
+  sourceSelectionRevision += 1;
   selectedFile = file || null;
   if (selectedFile) {
     selectedLibrarySource = null;
@@ -1144,7 +1173,8 @@ function setSelectedFile(file) {
   updateConvertButtonState();
 
   if (selectedFile) {
-    updateStatus('原始字体已就绪，选择处理模式和字符来源后即可开始。');
+    statusOverride = null;
+    refreshWorkspaceStatus();
     if (getSelectedOperationMode() === 'incremental') {
       sourceMatchMeta.textContent = `将使用手动上传的原始字体：${selectedFile.name}。`;
     }
@@ -1229,71 +1259,98 @@ function updateOperationPanels() {
 }
 
 function updateSubsetSummary() {
-  const subsetMode = getSelectedSubsetMode();
-  const operationMode = getSelectedOperationMode();
-  const remoteUrl = getExistingSubsetUrlValue();
-  const incrementalPrefix =
-    operationMode === 'incremental'
-      ? remoteUrl
-        ? '当前将以网络子集字体为基础，'
-        : existingSubsetFile.files?.length
-          ? '当前将以已压缩子集字体为基础，'
-          : '当前选择的是增量更新模式，但还没有提供当前子集字体；'
-      : '';
+  const validation = getSubsetModeValidationState();
+  subsetSummary.textContent = validation.message;
+  scheduleLivePreview();
+}
 
-  if (subsetMode === 'full') {
-    subsetSummary.textContent =
-      operationMode === 'incremental'
-        ? `${incrementalPrefix}不新增字符，只按当前子集字体已有字符重新生成。`
-        : '当前保留完整字体，不做字符切割。';
+function getRequestedCharacters() {
+  switch (getSelectedSubsetMode()) {
+    case 'manual': return getSubsetCharacters(subsetText.value);
+    case 'preset': return Array.from(getSelectedPreset()?.characters || '');
+    case 'file': return charsetFileLoadState === 'ready' ? getSubsetCharacters(charsetFileState.text) : [];
+    default: return [];
+  }
+}
+
+function getCharacterCoverage() {
+  return computeCoverage({
+    existing: getPreviewCharactersFromPayload(subsetInspectionState.payload),
+    requested: getRequestedCharacters(),
+    available: getPreviewCharactersFromPayload(sourceInspectionState.payload),
+    incremental: getSelectedOperationMode() === 'incremental',
+    full: getSelectedSubsetMode() === 'full'
+  });
+}
+
+function scheduleLivePreview() {
+  window.clearTimeout(livePreviewTimer);
+  if (!composingCharacters) livePreviewTimer = window.setTimeout(renderLivePreview, 150);
+}
+
+function renderLivePreview() {
+  const coverage = getCharacterCoverage();
+  const incremental = getSelectedOperationMode() === 'incremental';
+  const font = fontLoader.get('source');
+  const elements = getPreviewElements('live');
+  const state = previewStates.live;
+  const retryNeeded = font.status === 'error' || sourceInspectionState.status === 'error' ||
+    (incremental && (fontLoader.get('subset').status === 'error' || subsetInspectionState.status === 'error'));
+  document.querySelector('#previewRetry').classList.toggle('is-hidden', !retryNeeded);
+  const summary = document.querySelector('#characterCoverage');
+  if (sourceInspectionState.status !== 'ready') {
+    summary.textContent = '载入完整字体后，可检查字符是否存在并预览字形。';
+    setPreviewMessage('live', sourceInspectionState.status === 'loading' ? '正在加载真实字形…' : '请先选择完整字体。');
     return;
   }
-
-  if (subsetMode === 'preset') {
-    const preset = getSelectedPreset();
-    subsetSummary.textContent = preset
-      ? `${incrementalPrefix}使用系统预设“${preset.name}”，预计新增/保留 ${preset.count} 个汉字。`
-      : '系统预设尚未加载完成。';
+  summary.textContent = incremental
+    ? '旧字符 ' + coverage.existing.length + ' · 可新增 ' + coverage.added.length + ' · 已存在 ' + coverage.repeated.length + ' · 输入缺失 ' + coverage.missing.length + ' · 预计输出 ' + coverage.output.length
+    : '选中 ' + coverage.requested.length + ' · 可保留 ' + coverage.output.length + ' · 缺失 ' + coverage.missing.length;
+  summary.dataset.tone = coverage.missing.length || coverage.lost.length ? 'warning' : 'ready';
+  if (coverage.lost.length) summary.textContent += '。注意：完整字体还缺少 ' + coverage.lost.length + ' 个旧字符。';
+  if (font.status !== 'loaded') {
+    setPreviewMessage('live', font.error || '正在加载真实字形…');
     return;
   }
-
-  if (subsetMode === 'manual') {
-    const characters = getSubsetCharacters(subsetText.value);
-
-    if (!characters.length) {
-      subsetSummary.textContent =
-        operationMode === 'incremental'
-          ? `${incrementalPrefix}还没有填写要新增或保留的字符。`
-          : '当前选择手动输入，但还没有填写要保留的字符。';
-      return;
-    }
-
-    const preview = characters.slice(0, 24).join('');
-    const ellipsis = characters.length > 24 ? '…' : '';
-    subsetSummary.textContent =
-      operationMode === 'incremental'
-        ? `${incrementalPrefix}按手动输入处理，包含 ${characters.length} 个唯一字符。预览：${preview}${ellipsis}`
-        : `当前将按手动输入处理，包含 ${characters.length} 个唯一字符。预览：${preview}${ellipsis}`;
-    return;
+  const old = new Set(coverage.existing);
+  const missing = new Set(coverage.missing);
+  state.items = coverage.requested.map(character => ({
+    ...buildPreviewItem(character, missing.has(character)),
+    classification: missing.has(character) ? 'missing' : old.has(character) ? 'existing' : 'added',
+    label: missing.has(character) ? '缺失' : old.has(character) ? '已存在' : incremental ? '新增' : '保留'
+  }));
+  state.family = font.family;
+  state.parsedCount = coverage.requested.length - coverage.missing.length;
+  state.displayCount = state.items.length;
+  state.renderedCount = 0;
+  state.missingItems = state.items.filter(item => item.missing);
+  state.copyText = coverage.requested.filter(character => !missing.has(character)).join('');
+  state.copyCount = state.parsedCount;
+  resetPreviewCopyButton('live');
+  elements.copy.textContent = '复制可用字符';
+  elements.panel.classList.remove('is-hidden');
+  elements.text.replaceChildren();
+  if (state.items.length) appendPreviewCharacters('live');
+  else {
+    elements.meta.textContent = incremental && getSelectedSubsetMode() === 'full'
+      ? '本次不新增字符，将按旧字符集重新生成。' : '输入字符后，在这里查看真实字形。';
+    updatePreviewActionButtons('live');
   }
-
-  if (!charsetFile.files?.length) {
-    subsetSummary.textContent =
-      operationMode === 'incremental'
-        ? `${incrementalPrefix}还没有上传字符集文件。`
-        : '当前选择字符集文件模式，但还没有上传字符集文件。';
-    return;
+  // The old grid continues to use the old font's actual glyphs, even if the
+  // selected full font lacks them. Mark the potential loss explicitly.
+  const lost = new Set(coverage.lost);
+  const oldState = previewStates.subset;
+  const changed = oldState.items.some(item => Boolean(item.lost) !== lost.has(item.character));
+  if (changed) {
+    oldState.items.forEach(item => {
+      item.lost = lost.has(item.character);
+      item.classification = item.lost ? 'lost' : '';
+      item.label = item.lost ? '原字体缺失' : '';
+    });
+    oldState.renderedCount = 0;
+    subsetPreviewText.replaceChildren();
+    appendPreviewCharacters('subset');
   }
-
-  if (!charsetFileState.count) {
-    subsetSummary.textContent = `${incrementalPrefix}已选择文件 ${charsetFile.files[0].name}，正在等待可用字符或文件内容为空。`;
-    return;
-  }
-
-  subsetSummary.textContent =
-    operationMode === 'incremental'
-      ? `${incrementalPrefix}按字符集文件 ${charsetFileState.name} 处理，识别到 ${charsetFileState.count} 个唯一字符。`
-      : `当前将按字符集文件 ${charsetFileState.name} 处理，识别到 ${charsetFileState.count} 个唯一字符。`;
 }
 
 async function readFileAsBase64(file) {
@@ -1335,6 +1392,7 @@ async function readTextFile(file) {
 
 async function cacheCharsetFile(file) {
   const text = await readTextFile(file);
+  if (charsetFile.files?.[0] !== file) return;
   const count = getSubsetCharacters(text).length;
 
   charsetFileState = {
@@ -1352,6 +1410,7 @@ async function cacheCharsetFile(file) {
 
 async function cacheExistingSubsetFile(file) {
   const base64 = await readFileAsBase64(file);
+  if (existingSubsetFile.files?.[0] !== file) return;
 
   existingSubsetState = {
     name: file.name,
@@ -1363,6 +1422,11 @@ async function cacheExistingSubsetFile(file) {
 }
 
 function getPreviewElements(kind) {
+  if (kind === 'live') return {
+    panel: document.querySelector('#livePreviewPanel'), meta: document.querySelector('#livePreviewMeta'),
+    text: document.querySelector('#livePreviewText'), more: document.querySelector('#livePreviewMore'),
+    copy: document.querySelector('#livePreviewCopy')
+  };
   return kind === 'output'
     ? {
         panel: outputPreviewPanel,
@@ -1408,32 +1472,18 @@ function updatePreviewActionButtons(kind) {
   elements.copy.classList.toggle('is-hidden', !state.copyText);
 }
 
-function getPreviewStyleElement(kind) {
-  if (kind === 'output') {
-    if (!outputPreviewStyle) {
-      outputPreviewStyle = document.createElement('style');
-      outputPreviewStyle.id = 'outputPreviewFontStyle';
-      document.head.append(outputPreviewStyle);
-    }
 
-    return outputPreviewStyle;
-  }
-
-  if (!subsetPreviewStyle) {
-    subsetPreviewStyle = document.createElement('style');
-    subsetPreviewStyle.id = 'subsetPreviewFontStyle';
-    document.head.append(subsetPreviewStyle);
-  }
-
-  return subsetPreviewStyle;
-}
 
 function updatePreviewMeta(kind) {
   const elements = getPreviewElements(kind);
   const state = previewStates[kind];
+  if (kind === 'live') {
+    elements.meta.textContent = `共 ${state.displayCount} 个不同字符，已显示 ${state.renderedCount} 个。${state.missingItems.length ? '缺失字符用系统字形提示。' : ''}`;
+    return;
+  }
   const missingText =
     state.missingItems.length > 0
-      ? ` 未识别：${state.missingItems.map((item) => item.title).join('、')}。`
+      ? ` 缺失 ${state.missingItems.length} 个字符：${state.missingItems.slice(0, 12).map((item) => item.character).join(' ')}${state.missingItems.length > 12 ? '…' : ''}。`
       : '';
 
   if (!state.parsedCount && !state.displayCount) {
@@ -1450,8 +1500,7 @@ function updatePreviewMeta(kind) {
   }
 
   elements.meta.textContent =
-    `${state.filename} ${state.context}包含 ${state.parsedCount} 个可预览字符，已显示 ${state.renderedCount} 个。` +
-    ' 预览按字符集展开，不按原句顺序。';
+    `${state.filename} 包含 ${state.parsedCount} 个字符，已显示 ${state.renderedCount} 个。`;
 }
 
 function appendPreviewCharacters(kind) {
@@ -1471,14 +1520,14 @@ function appendPreviewCharacters(kind) {
 
   for (const item of chunk) {
     const token = document.createElement('span');
-    token.className = `preview-token${item.missing ? ' is-missing' : ''}`;
-    token.title = item.missing ? `${item.title}（输出字体里未识别到）` : item.title;
+    token.className = `preview-token${item.missing ? ' is-missing' : ''}${item.classification ? ` is-${item.classification}` : ''}`;
+    token.title = `${item.title}${item.label ? `（${item.label}）` : item.missing ? '（字体中缺失）' : ''}`;
 
     const glyph = document.createElement('span');
     glyph.className = 'preview-token-char';
     glyph.textContent = item.displayCharacter;
 
-    if (item.usePreviewFont && state.family) {
+    if (item.usePreviewFont && state.family && !item.missing) {
       glyph.style.fontFamily = `"${state.family}", "Segoe UI Symbol", sans-serif`;
     }
 
@@ -1487,6 +1536,12 @@ function appendPreviewCharacters(kind) {
     code.textContent = item.infoLabel;
 
     token.append(glyph, code);
+    if (item.label) {
+      const label = document.createElement('span');
+      label.className = 'preview-token-label';
+      label.textContent = item.label;
+      token.append(label);
+    }
     fragment.append(token);
   }
 
@@ -1515,14 +1570,12 @@ function clearPreview(kind) {
   elements.text.replaceChildren();
   resetPreviewCopyButton(kind);
   updatePreviewActionButtons(kind);
-
-  const styleElement = kind === 'output' ? outputPreviewStyle : subsetPreviewStyle;
-  if (styleElement) {
-    styleElement.textContent = '';
-  }
+  if (kind !== 'live') fontLoader.clear(kind);
 }
 
 function clearSubsetPreview() {
+  subsetPreviewController?.abort();
+  subsetInspectionState = { status: 'idle', payload: null, error: '' };
   window.clearTimeout(subsetPreviewTimer);
   subsetPreviewRequestId += 1;
   subsetPreviewTargetKey = '';
@@ -1604,10 +1657,7 @@ function setOutputPreviewMessage(message) {
 }
 
 function renderFontPreview(kind, payload, targetKey, context, options = {}) {
-  const type = typeof payload.type === 'string' ? payload.type.toLowerCase() : 'ttf';
-  const mimeType = FONT_MIME_TYPES[type] || 'font/ttf';
-  const formatHint = FONT_FORMAT_HINTS[type] || 'truetype';
-  const family = `${kind === 'output' ? 'OutputPreviewFont' : 'SubsetPreviewFont'}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const family = fontLoader.get(kind).family;
   const parsedCharacterList = getPreviewCharactersFromPayload(payload);
   const parsedCodePointSet = new Set(
     parsedCharacterList
@@ -1633,15 +1683,6 @@ function renderFontPreview(kind, payload, targetKey, context, options = {}) {
         : '当前子集字体';
   const elements = getPreviewElements(kind);
   const state = previewStates[kind];
-
-  getPreviewStyleElement(kind).textContent = `
-@font-face {
-  font-family: "${family}";
-  src: url("data:${mimeType};base64,${payload.base64Data || ''}") format("${formatHint}");
-  font-weight: 400;
-  font-style: normal;
-  font-display: block;
-}`;
 
   state.items = items;
   state.parsedCount = Number(payload.count || parsedItems.length || 0);
@@ -1689,7 +1730,12 @@ async function inspectExistingSubsetForPreview() {
 
   const requestId = subsetPreviewRequestId + 1;
   subsetPreviewRequestId = requestId;
+  subsetPreviewController?.abort();
+  const controller = new AbortController();
+  subsetPreviewController = controller;
+  subsetInspectionState = { status: 'loading', payload: null, error: '' };
   setSubsetPreviewMessage('正在读取当前子集字体字符...');
+  updateConvertButtonState();
 
   try {
     let requestPayload;
@@ -1713,12 +1759,15 @@ async function inspectExistingSubsetForPreview() {
       };
     }
 
+    if (requestId !== subsetPreviewRequestId) return null;
+    requestPayload.includePreviewFont = true;
     const response = await apiFetch('/api/font-preview', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify(requestPayload)
+      body: JSON.stringify(requestPayload),
+      signal: controller.signal
     });
 
     if (!response.ok) {
@@ -1732,11 +1781,21 @@ async function inspectExistingSubsetForPreview() {
       return null;
     }
 
-    renderSubsetPreview(payload, target.key);
+    let previewError = '';
+    try { await fontLoader.load('subset', payload); } catch (error) { previewError = error.message; }
+    if (requestId !== subsetPreviewRequestId) return null;
+    subsetInspectionState = { status: 'ready', payload, error: '' };
+    subsetPreviewTargetKey = target.key;
+    if (previewError) setSubsetPreviewMessage(previewError);
+    else renderSubsetPreview(payload, target.key);
+    updateConvertButtonState();
     return payload;
   } catch (error) {
     if (requestId === subsetPreviewRequestId) {
-      setSubsetPreviewMessage(error instanceof Error ? error.message : '当前子集字体预览解析失败。');
+      const message = error instanceof Error ? error.message : '当前子集字体预览解析失败。';
+      subsetInspectionState = { status: 'error', payload: null, error: message };
+      setSubsetPreviewMessage(message);
+      updateConvertButtonState();
     }
 
     return null;
@@ -1756,14 +1815,17 @@ function scheduleSubsetPreview() {
     return;
   }
 
-  subsetPreviewRequestId += 1;
+  clearSubsetPreview();
+  subsetInspectionState = { status: 'loading', payload: null, error: '' };
   setSubsetPreviewMessage('准备读取当前子集字体字符...');
+  updateConvertButtonState();
   subsetPreviewTimer = window.setTimeout(() => {
     void inspectExistingSubsetForPreview();
-  }, 450);
+  }, 200);
 }
 
 function clearMatchedSource(message = getDefaultSourceMatchMessage()) {
+  window.clearTimeout(sourceMatchTimer);
   matchedSourceState = null;
   sourceMatchRequestId += 1;
   sourceMatchMeta.textContent = message;
@@ -1773,6 +1835,7 @@ function clearMatchedSource(message = getDefaultSourceMatchMessage()) {
 }
 
 function applyMatchedSource(record, matchKey) {
+  if (getSelectedOperationMode() !== 'incremental' || getExistingSubsetMatchTarget()?.key !== matchKey) return;
   matchedSourceState = {
     matchKey,
     sourceHash: record.sourceHash || '',
@@ -1861,8 +1924,9 @@ async function matchOriginalSourceForExistingSubset() {
   updateConvertButtonState();
 
   try {
-    const fingerprint =
-      target.type === 'url'
+    const fingerprint = subsetPreviewTargetKey === target.key && subsetInspectionState.payload?.sourceHash
+      ? { hash: subsetInspectionState.payload.sourceHash }
+      : target.type === 'url'
         ? await getRemoteSubsetFingerprint(target.url)
         : {
             filename: target.file.name,
@@ -1986,6 +2050,7 @@ async function getSourceFontPayload(operationMode) {
 
 async function previewOutputFont(blob, outputName, previewCharacters = []) {
   setOutputPreviewMessage('正在生成压缩完成字体预览...');
+  let count;
 
   try {
     const data = await readFileAsBase64(blob);
@@ -1996,7 +2061,9 @@ async function previewOutputFont(blob, outputName, previewCharacters = []) {
       },
       body: JSON.stringify({
         filename: outputName,
-        data
+        data,
+        includeData: false,
+        includePreviewFont: true
       })
     });
 
@@ -2006,11 +2073,13 @@ async function previewOutputFont(blob, outputName, previewCharacters = []) {
     }
 
     const payload = await response.json();
+    count = payload.count;
+    await fontLoader.load('output', payload);
     renderOutputPreview(payload, previewCharacters);
-    return true;
+    return { count, loaded: true };
   } catch (error) {
     setOutputPreviewMessage(error instanceof Error ? error.message : '压缩完成字体预览解析失败。');
-    return false;
+    return { count, loaded: false };
   }
 }
 
@@ -2110,6 +2179,10 @@ async function getSubsetPayload() {
 }
 
 async function getExistingSubsetPayload() {
+  // Use the same inspected bytes even if a remote file changes before export.
+  if (subsetInspectionState.status === 'ready' && subsetInspectionState.payload?.base64Data) {
+    return { filename: subsetInspectionState.payload.filename, data: subsetInspectionState.payload.base64Data, url: '' };
+  }
   const remoteUrl = getExistingSubsetUrlValue();
 
   if (remoteUrl) {
@@ -2205,22 +2278,6 @@ async function convertSelectedFile() {
     const contentDisposition = response.headers.get('Content-Disposition') || '';
     const sourceBytes = Number(response.headers.get('X-Source-Bytes') || sourcePayload.size || 0);
     const outputBytes = Number(response.headers.get('X-Output-Bytes') || blob.size);
-    const subsetCount = Number(response.headers.get('X-Subset-Count') || subsetPayload.uniqueCount);
-    const newSubsetCount = Number(response.headers.get('X-New-Subset-Count') || subsetPayload.uniqueCount);
-    const existingSubsetCount = Number(response.headers.get('X-Existing-Subset-Count') || 0);
-    const operationModeHeader = response.headers.get('X-Operation-Mode') || operationMode;
-    const subsetSourceMode = response.headers.get('X-Subset-Source-Mode') || subsetPayload.subsetMode;
-    const subsetSourceLabel = decodeURIComponent(
-      response.headers.get('X-Subset-Source-Label') || subsetPayload.label
-    );
-    const sourceHasHinting = response.headers.get('X-Source-Has-Hinting') === 'true';
-    const sourceHasKerning = response.headers.get('X-Source-Has-Kerning') === 'true';
-    const outputHasKerning = response.headers.get('X-Output-Has-Kerning') === 'true';
-    const removedKerningTables = (response.headers.get('X-Removed-Kerning-Tables') || '')
-      .split(',')
-      .map((item) => item.trim())
-      .filter(Boolean);
-    const subsetGlyphHintingStripped = Number(response.headers.get('X-Subset-Glyph-Hinting-Stripped') || 0);
     const responseOutputType = response.headers.get('X-Output-Type') || outputType;
     const serverSourceSaved = response.headers.get('X-Server-Source-Saved') === 'true';
     const serverSourceAction = response.headers.get('X-Server-Source-Action') || (serverSourceSaved ? 'created' : 'skipped');
@@ -2241,57 +2298,19 @@ async function convertSelectedFile() {
         ? '原始字体和匹配记录已保存，可在字体库中继续复用。'
         : '原始字体已保存到字体库；本次未保存自动匹配记录。'
       : '本次仅转换，原始字体和匹配记录未保存。请下载结果；后续增量更新需再次提供原始全量字体。';
-    workflow.setResult({ blob, outputName, sourceBytes, outputBytes, subsetCount });
-    const outputPreviewCharacters =
-      operationMode === 'incremental' || subsetPayload.subsetMode === 'full'
-        ? []
-        : Array.isArray(subsetPayload.previewCharacters)
-          ? subsetPayload.previewCharacters
-          : [];
+    const coverage = getCharacterCoverage();
+    const outputPreviewCharacters = [...new Set([...coverage.existing, ...coverage.requested])];
     const renderedOutputPreview = await previewOutputFont(blob, outputName, outputPreviewCharacters);
+    workflow.setResult({ blob, outputName, sourceBytes, outputBytes, subsetCount: renderedOutputPreview.count });
 
-    const notes = [];
-    if (operationModeHeader === 'incremental') {
-      notes.push(`已合并当前子集的 ${existingSubsetCount} 个字符`);
-      if (subsetSourceMode === 'full') {
-        notes.push(`本次未新增字符，重新生成后共 ${subsetCount} 个唯一字符`);
-      } else {
-        notes.push(`本次新增来源 ${subsetSourceLabel}，识别到 ${newSubsetCount} 个字符`);
-        notes.push(`合并后共 ${subsetCount} 个唯一字符`);
-      }
-    } else if (subsetSourceMode === 'full') {
-      notes.push('本次未做字符切割');
-    } else {
-      notes.push(`使用 ${subsetSourceLabel}，保留 ${subsetCount} 个唯一字符`);
-    }
-    if (keepHinting.checked && !sourceHasHinting) {
-      notes.push('源字体不含 hinting 数据，勾选无影响');
-    } else if (keepHinting.checked && subsetGlyphHintingStripped > 0) {
-      notes.push(`为避免子集字形异常，已移除 ${subsetGlyphHintingStripped} 个字形的局部 hinting 指令`);
-    }
-    if (keepKerning.checked && !sourceHasKerning) {
-      notes.push('源字体不含 kerning 数据，勾选无影响');
-    } else if (!keepKerning.checked && removedKerningTables.length > 0 && !outputHasKerning) {
-      notes.push('已按当前设置移除 kerning 表，避免 hinting 连带保留字距信息');
-    }
-    if (serverMatchAction === 'created') {
-      notes.push('服务端已建立当前输出与原始字体的自动匹配');
-    }
-    if (serverSourceAction === 'created') {
-      notes.push('原始字体已保存到服务端列表');
-    } else if (serverSourceAction === 'updated') {
-      notes.push('检测到同源字体，已刷新服务端原始字体记录');
-    } else if (serverSourceAction === 'skipped') {
-      notes.push('本次仅转换，原始字体和匹配记录未保存');
-    }
-    if (renderedOutputPreview) {
-      notes.push('已生成压缩完成字体预览');
-    }
+    const actualCount = renderedOutputPreview.count;
+    const details = [formatSizeDelta(sourceBytes, outputBytes)];
+    if (Number.isInteger(actualCount)) details.push('实际输出 ' + actualCount + ' 个字符');
+    if (operationMode === 'incremental') details.push('可新增 ' + coverage.added.length + ' 个字符');
+    if (coverage.missing.length || coverage.lost.length) details.push('缺失字符未写入，请检查结果网格');
+    if (!renderedOutputPreview.loaded) details.push('预览暂时失败，文件已生成，可下载');
+    updateStatus(details.join('。') + '。', coverage.missing.length || coverage.lost.length || !renderedOutputPreview.loaded ? 'warning' : 'success');
 
-    updateStatus(
-      `转换完成：${formatSizeDelta(sourceBytes, outputBytes)}。${notes.length ? ` ${notes.join('；')}。` : ''}`,
-      'success'
-    );
   } catch (error) {
     updateStatus(error instanceof Error ? error.message : '转换失败，请稍后重试。', 'error');
   } finally {
@@ -2309,6 +2328,35 @@ function syncUI() {
 fileInput.addEventListener('change', () => {
   setSelectedFile(fileInput.files?.[0] || null);
 });
+
+// Clear completed/failed action messages as soon as the user edits the job.
+['input', 'change'].forEach(eventName => document.querySelector('#workflowFields').addEventListener(eventName, () => {
+  statusOverride = null;
+}, true));
+subsetText.addEventListener('compositionstart', () => {
+  composingCharacters = true;
+  window.clearTimeout(livePreviewTimer);
+});
+subsetText.addEventListener('compositionend', () => {
+  composingCharacters = false;
+  updateSubsetSummary();
+  updateConvertButtonState();
+});
+document.querySelector('#livePreviewMore').addEventListener('click', () => appendPreviewCharacters('live'));
+document.querySelector('#livePreviewCopy').addEventListener('click', () => void copyPreviewCharacters('live'));
+document.querySelector('#previewRetry').addEventListener('click', async () => {
+  statusOverride = null;
+  const retry = document.querySelector('#previewRetry');
+  retry.disabled = true;
+  await Promise.all([
+    inspectSourceFontForPreflight(true),
+    getSelectedOperationMode() === 'incremental' ? inspectExistingSubsetForPreview() : Promise.resolve()
+  ]);
+  retry.disabled = false;
+  updateConvertButtonState();
+});
+document.querySelector('#statusBanner').append(document.querySelector('#previewRetry'));
+window.addEventListener('beforeunload', () => fontLoader.clearAll());
 
 subsetModeInputs.forEach((input) => {
   input.addEventListener('change', () => {
@@ -2433,9 +2481,10 @@ deleteSavedSourceButton.addEventListener('click', async () => {
 
     if (selectedLibrarySource?.sourceHash === sourceHash) {
       selectedLibrarySource = null;
-      updateSourceFontMeta();
-      updateConvertButtonState();
     }
+    if (matchedSourceState?.sourceHash === sourceHash) clearMatchedSource('已移除自动匹配的完整字体，请重新选择来源。');
+    updateSourceFontMeta();
+    updateConvertButtonState();
 
     renderSourceLibrary();
     updateStatus(`已从 Cloudflare 字体库移除：${getSourceDisplayName(record)}。`);
@@ -2496,10 +2545,12 @@ charsetFile.addEventListener('change', async () => {
     charsetFileMeta.textContent = `正在读取 ${file.name}...`;
     updateConvertButtonState();
     await cacheCharsetFile(file);
+    if (charsetFile.files?.[0] !== file) return;
     charsetFileLoadState = 'ready';
     updateSubsetSummary();
     updateConvertButtonState();
   } catch (error) {
+    if (charsetFile.files?.[0] !== file) return;
     charsetFileLoadState = 'error';
     charsetFileLoadError = error instanceof Error ? error.message : '字符集文件读取失败。';
     charsetFileMeta.textContent = charsetFileLoadError;
@@ -2508,8 +2559,11 @@ charsetFile.addEventListener('change', async () => {
   }
 });
 
-existingSubsetFile.addEventListener('change', async () => {
+existingSubsetFile.addEventListener('change', () => {
   const file = existingSubsetFile.files?.[0];
+  clearSubsetPreview();
+  clearMatchedSource();
+  existingSubsetState = { name: '', size: 0, lastModified: 0, base64: '' };
 
   if (!file) {
     existingSubsetState = {
@@ -2520,33 +2574,25 @@ existingSubsetFile.addEventListener('change', async () => {
     };
     updateExistingSubsetMeta();
     clearMatchedSource();
-    clearSubsetPreview();
+    scheduleSubsetPreview();
     updateSubsetSummary();
     updateConvertButtonState();
     return;
   }
 
-  try {
-    await cacheExistingSubsetFile(file);
-    if (selectedFile || selectedLibrarySource) {
-      const sourceName = selectedFile?.name || getSourceDisplayName(selectedLibrarySource);
-      sourceMatchMeta.textContent = `将使用${selectedFile ? '手动上传' : '已保存'}的原始字体：${sourceName}。`;
-    } else {
-      scheduleOriginalSourceMatch();
-    }
-    scheduleSubsetPreview();
-    updateSubsetSummary();
-    updateConvertButtonState();
-  } catch (error) {
-    existingSubsetMeta.textContent = error instanceof Error ? error.message : '当前子集字体读取失败。';
-    updateStatus(existingSubsetMeta.textContent, 'error');
-    clearMatchedSource('当前子集字体读取失败，请重新选择。');
-    clearSubsetPreview();
-    updateConvertButtonState();
-  }
+  existingSubsetMeta.textContent = `正在读取 ${file.name}…`;
+  if (selectedFile || selectedLibrarySource) {
+    const sourceName = selectedFile?.name || getSourceDisplayName(selectedLibrarySource);
+    sourceMatchMeta.textContent = `将使用完整字体：${sourceName}。`;
+  } else scheduleOriginalSourceMatch();
+  scheduleSubsetPreview();
+  updateSubsetSummary();
+  updateConvertButtonState();
 });
 
 existingSubsetUrl.addEventListener('input', () => {
+  clearSubsetPreview();
+  clearMatchedSource();
   updateExistingSubsetMeta();
   if (selectedFile || selectedLibrarySource) {
     const sourceName = selectedFile?.name || getSourceDisplayName(selectedLibrarySource);
